@@ -1,0 +1,1395 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>生物観察データベース</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/docx/8.5.0/docx.umd.min.js"></script>
+<!-- Firebase -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
+import { getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc,
+  query, orderBy, onSnapshot, serverTimestamp, where, getDoc, setDoc }
+  from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
+
+// ============================================================
+// 🔧 YOUR FIREBASE CONFIG — ここだけ書き換えてください
+// ============================================================
+const firebaseConfig = {
+  apiKey: "AIzaSyBrjWRfVeSxFJ9rnDeml894Ig990K3EP8s",
+  authDomain: "bio-observer.firebaseapp.com",
+  projectId: "bio-observer",
+  storageBucket: "bio-observer.firebasestorage.app",
+  messagingSenderId: "1051983479580",
+  appId: "1:1051983479580:web:c7efe96e8889406078f0d9",
+  measurementId: "G-7EX58C78PZ"
+};
+// ============================================================
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+// グローバルに公開
+window._fb = { auth, db, GoogleAuthProvider, signInWithPopup, signOut,
+  onAuthStateChanged, collection, addDoc, getDocs, doc, updateDoc, deleteDoc,
+  query, orderBy, onSnapshot, serverTimestamp, where, getDoc, setDoc };
+window._fbReady = true;
+document.dispatchEvent(new Event('fbReady'));
+</script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+JP:wght@400;600;700&family=Noto+Sans+JP:wght@300;400;500&family=Space+Mono:wght@400;700&display=swap');
+:root{
+  --moss:#2d4a1e;--fern:#4a7c35;--sage:#7aab5e;--mist:#c8deb8;
+  --cream:#f5f0e8;--stone:#8a8070;--ink:#1a1a14;--dew:#e8f2df;
+  --amber:#c47a2a;--sky:#4a8fa8;--error:#c0392b;
+  --check-ok:#1a7c4a;--check-warn:#b87a00;--check-ng:#c0392b;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:'Noto Sans JP',sans-serif;background:var(--cream);color:var(--ink);min-height:100vh}
+body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse at 10% 20%,rgba(74,124,53,.06) 0%,transparent 60%),radial-gradient(ellipse at 90% 80%,rgba(45,74,30,.08) 0%,transparent 60%);pointer-events:none;z-index:0}
+
+/* LOGIN SCREEN */
+.login-screen{position:fixed;inset:0;background:linear-gradient(135deg,var(--moss) 0%,#1a3010 60%,#0d2008 100%);display:flex;align-items:center;justify-content:center;z-index:500;flex-direction:column;gap:0}
+.login-screen.hidden{display:none}
+.login-box{background:rgba(255,255,255,.06);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,.12);border-radius:24px;padding:52px 44px;text-align:center;max-width:400px;width:90%}
+.login-logo{font-size:52px;margin-bottom:16px;filter:drop-shadow(0 4px 16px rgba(0,0,0,.4))}
+.login-title{font-family:'Noto Serif JP',serif;font-size:24px;font-weight:700;color:#e8f2df;margin-bottom:6px;letter-spacing:.04em}
+.login-sub{font-size:12px;color:#7aab5e;letter-spacing:.08em;text-transform:uppercase;font-family:'Space Mono',monospace;margin-bottom:36px}
+.login-desc{font-size:13px;color:rgba(255,255,255,.6);line-height:1.8;margin-bottom:36px}
+.btn-google{display:flex;align-items:center;justify-content:center;gap:12px;width:100%;padding:14px 20px;background:#fff;border:none;border-radius:12px;font-family:'Noto Sans JP',sans-serif;font-size:14px;font-weight:500;color:#1a1a14;cursor:pointer;transition:all .2s;box-shadow:0 4px 16px rgba(0,0,0,.3)}
+.btn-google:hover{background:#f5f5f5;transform:translateY(-1px);box-shadow:0 8px 24px rgba(0,0,0,.35)}
+.btn-google svg{width:20px;height:20px;flex-shrink:0}
+.login-note{font-size:11px;color:rgba(255,255,255,.35);margin-top:20px;line-height:1.6}
+
+/* HEADER */
+header{background:var(--moss);position:sticky;top:0;z-index:100;box-shadow:0 2px 20px rgba(0,0,0,.3)}
+.header-inner{max-width:1440px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+.logo{display:flex;align-items:center;gap:10px;flex-shrink:0}
+.logo-icon{font-size:24px}
+.logo-text .logo-title{font-family:'Noto Serif JP',serif;font-weight:700;font-size:16px;color:#c8deb8}
+.logo-text .logo-sub{font-family:'Space Mono',monospace;font-size:8px;color:#7aab5e;letter-spacing:.1em;text-transform:uppercase}
+.header-right{display:flex;align-items:center;gap:10px}
+.user-pill{display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.1);border-radius:20px;padding:5px 12px 5px 5px}
+.user-avatar{width:26px;height:26px;border-radius:50%;object-fit:cover}
+.user-name{font-size:12px;color:#c8deb8;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.user-role{font-size:9px;font-family:'Space Mono',monospace;padding:2px 7px;border-radius:8px;font-weight:700}
+.role-admin{background:rgba(196,122,42,.3);color:#f0b060}
+.role-member{background:rgba(74,143,168,.3);color:#90d0e8}
+.btn-signout{background:rgba(255,255,255,.1);border:none;color:#c8deb8;padding:6px 12px;border-radius:8px;font-size:11px;cursor:pointer;transition:all .2s;font-family:'Noto Sans JP',sans-serif}
+.btn-signout:hover{background:rgba(255,255,255,.2)}
+
+/* NAV */
+nav{background:rgba(0,0,0,.15);border-bottom:1px solid rgba(255,255,255,.08)}
+.nav-inner{max-width:1440px;margin:0 auto;padding:0 20px;display:flex;gap:2px;overflow-x:auto;scrollbar-width:none}
+.nav-inner::-webkit-scrollbar{display:none}
+.nav-tab{background:none;border:none;color:rgba(200,222,184,.7);padding:10px 16px;cursor:pointer;font-family:'Noto Sans JP',sans-serif;font-size:12px;transition:all .2s;white-space:nowrap;border-bottom:2px solid transparent;position:relative}
+.nav-tab:hover{color:#c8deb8;background:rgba(255,255,255,.05)}
+.nav-tab.active{color:#fff;border-bottom-color:var(--sage);font-weight:500}
+.nav-tab.admin-only{opacity:.4;pointer-events:none}
+.nav-tab.admin-only.unlocked{opacity:1;pointer-events:auto}
+.badge{position:absolute;top:4px;right:4px;background:var(--error);color:#fff;border-radius:8px;font-size:8px;padding:1px 4px;font-family:'Space Mono',monospace;display:none}
+.badge.visible{display:block}
+
+/* MAIN */
+.main{max-width:1440px;margin:0 auto;padding:20px;position:relative;z-index:1}
+.page{display:none}
+.page.active{display:block}
+
+/* LOADING */
+.loading-overlay{position:fixed;inset:0;background:rgba(245,240,232,.8);z-index:400;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px}
+.loading-overlay.hidden{display:none}
+.loading-spinner{width:36px;height:36px;border:3px solid var(--mist);border-top-color:var(--fern);border-radius:50%;animation:spin .8s linear infinite}
+.loading-text{font-size:13px;color:var(--stone)}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* CARD */
+.card{background:#fff;border-radius:14px;border:1px solid rgba(122,171,94,.2);box-shadow:0 2px 14px rgba(45,74,30,.06);overflow:hidden;margin-bottom:16px}
+.card-hd{background:linear-gradient(135deg,var(--dew),#fff);padding:14px 20px;border-bottom:1px solid var(--mist);display:flex;align-items:center;gap:10px}
+.card-hd-icon{width:30px;height:30px;background:var(--fern);border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0}
+.card-hd h2{font-family:'Noto Serif JP',serif;font-size:14px;font-weight:600;color:var(--moss)}
+.card-hd p{font-size:11px;color:var(--stone);margin-top:1px}
+.card-body{padding:18px 20px}
+
+/* FORM */
+.fg{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
+.fg:last-child{margin-bottom:0}
+.fg-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.lbl{font-size:11px;font-weight:500;color:var(--stone);letter-spacing:.04em;text-transform:uppercase;display:flex;align-items:center;gap:4px}
+.req{color:var(--amber)}
+input[type=text],input[type=number],input[type=date],input[type=time],select,textarea{
+  font-family:'Noto Sans JP',sans-serif;font-size:14px;color:var(--ink);
+  background:var(--cream);border:1.5px solid var(--mist);border-radius:9px;
+  padding:10px 12px;transition:all .2s;outline:none;width:100%;
+  -webkit-appearance:none;appearance:none}
+input:focus,select:focus,textarea:focus{border-color:var(--fern);background:#fff;box-shadow:0 0 0 3px rgba(74,124,53,.1)}
+textarea{resize:vertical;min-height:72px}
+select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%238a8070' stroke-width='1.5' fill='none'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:32px}
+
+/* CAT GRID */
+.cat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}
+.cat-btn{display:flex;flex-direction:column;align-items:center;gap:3px;padding:10px 6px;border:1.5px solid var(--mist);border-radius:9px;background:var(--cream);cursor:pointer;transition:all .2s;font-family:'Noto Sans JP',sans-serif;-webkit-tap-highlight-color:transparent}
+.cat-btn:active{transform:scale(.96)}
+.cat-btn.sel{border-color:var(--fern);background:var(--dew);box-shadow:0 0 0 2px rgba(74,124,53,.15)}
+.cat-btn .ci{font-size:22px}
+.cat-btn .cl{font-size:10px;color:var(--stone)}
+.cat-btn.sel .cl{color:var(--fern);font-weight:500}
+
+/* OPT BUTTONS */
+.opt-row{display:flex;gap:6px;flex-wrap:wrap}
+.opt-btn{padding:7px 13px;border:1.5px solid var(--mist);border-radius:18px;background:var(--cream);cursor:pointer;font-family:'Noto Sans JP',sans-serif;font-size:12px;color:var(--stone);transition:all .2s;-webkit-tap-highlight-color:transparent}
+.opt-btn:active{transform:scale(.95)}
+.opt-btn.sel{border-color:var(--fern);background:var(--dew);color:var(--moss);font-weight:500}
+
+/* GPS */
+.gps-row{display:flex;gap:8px}
+.gps-row input{flex:1}
+.btn-paste{padding:10px 12px;background:var(--sky);color:#fff;border:none;border-radius:9px;cursor:pointer;font-size:12px;white-space:nowrap;transition:all .2s;-webkit-tap-highlight-color:transparent}
+.coords-row{display:flex;gap:8px;margin-top:6px;align-items:center}
+.coord-box{flex:1;background:var(--dew);border:1px solid var(--mist);border-radius:7px;padding:6px 10px;font-family:'Space Mono',monospace;font-size:11px;color:var(--fern)}
+.coord-lbl{font-size:9px;color:var(--stone);text-transform:uppercase}
+.map-link{font-size:11px;color:var(--sky);text-decoration:none;white-space:nowrap}
+
+/* COPY ENV */
+.copy-banner{background:linear-gradient(135deg,#eaf4ff,#f0f8e8);border:1.5px solid var(--sky);border-radius:10px;padding:12px 14px;margin-bottom:14px;display:none}
+.copy-banner.visible{display:block}
+.copy-banner-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;flex-wrap:wrap;gap:6px}
+.copy-banner-label{font-size:12px;font-weight:600;color:var(--sky)}
+.copy-banner-prev{font-size:10px;color:var(--stone);font-family:'Space Mono',monospace;margin-bottom:8px}
+.copy-checks{display:flex;flex-wrap:wrap;gap:5px}
+.copy-chk{display:flex;align-items:center;gap:4px;padding:4px 10px;border:1.5px solid var(--mist);border-radius:14px;background:#fff;cursor:pointer;font-size:11px;color:var(--stone);transition:all .2s;user-select:none}
+.copy-chk.on{border-color:var(--sky);background:#eaf4ff;color:#2a6a8a}
+.copy-chk input{accent-color:var(--sky);width:12px;height:12px;margin:0;cursor:pointer}
+.btn-copy{padding:7px 14px;background:var(--sky);color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer;font-family:'Noto Sans JP',sans-serif;transition:all .2s;-webkit-tap-highlight-color:transparent}
+
+/* COND DESC */
+.cond-desc{margin-top:6px;font-size:11px;color:var(--stone);line-height:1.6;padding:6px 10px;background:var(--cream);border-radius:7px;display:none}
+
+/* SIGN ROW */
+.sign-hint{font-size:10px;color:var(--stone);margin-top:4px}
+
+/* SUBMIT */
+.btn-submit{width:100%;padding:14px;background:var(--fern);color:#fff;border:none;border-radius:11px;font-family:'Noto Serif JP',serif;font-size:14px;font-weight:600;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:8px;margin-top:14px;-webkit-tap-highlight-color:transparent}
+.btn-submit:active{transform:scale(.98)}
+.btn-submit:hover{background:var(--moss)}
+.btn-submit:disabled{opacity:.5;cursor:not-allowed}
+
+/* OFFLINE BANNER */
+.offline-banner{background:#c47a2a;color:#fff;text-align:center;padding:8px;font-size:12px;display:none}
+.offline-banner.visible{display:block}
+
+/* DB PAGE */
+.db-toolbar{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center}
+.search-wrap{position:relative;flex:1;min-width:160px}
+.search-wrap input{padding-left:34px}
+.search-ic{position:absolute;left:11px;top:50%;transform:translateY(-50%);font-size:14px;color:var(--stone);pointer-events:none}
+.filter-sel{flex:1;min-width:120px;max-width:160px}
+.btn-sec{padding:9px 14px;background:#fff;color:var(--moss);border:1.5px solid var(--mist);border-radius:9px;font-family:'Noto Sans JP',sans-serif;font-size:12px;cursor:pointer;transition:all .2s;display:flex;align-items:center;gap:5px;white-space:nowrap;-webkit-tap-highlight-color:transparent}
+.btn-sec:hover{border-color:var(--fern);color:var(--fern)}
+
+/* TABLE (scrollable on mobile) */
+.tbl-wrap{background:#fff;border-radius:14px;border:1px solid rgba(122,171,94,.2);box-shadow:0 2px 14px rgba(45,74,30,.06);overflow:hidden}
+.tbl-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse;font-size:12px;min-width:600px}
+thead{background:linear-gradient(135deg,var(--moss),var(--fern));color:#fff}
+th{padding:10px 12px;text-align:left;font-family:'Space Mono',monospace;font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;white-space:nowrap}
+td{padding:10px 12px;border-bottom:1px solid rgba(200,222,184,.4);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:var(--dew)}
+.sp-name{font-weight:500}
+.sp-sci{font-style:italic;color:var(--stone);font-size:10px}
+.count-badge{background:var(--dew);border:1px solid var(--mist);color:var(--fern);font-family:'Space Mono',monospace;font-size:10px;padding:2px 6px;border-radius:7px;font-weight:700}
+.id-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;white-space:nowrap}
+.id-ok{background:rgba(26,124,74,.1);color:var(--check-ok);border:1px solid rgba(26,124,74,.2)}
+.id-warn{background:rgba(184,122,0,.1);color:var(--check-warn);border:1px solid rgba(184,122,0,.2)}
+.id-ng{background:rgba(192,57,43,.1);color:var(--check-ng);border:1px solid rgba(192,57,43,.2)}
+.id-none{background:rgba(138,128,112,.1);color:var(--stone);border:1px solid rgba(138,128,112,.2)}
+.act-btn{background:none;border:none;cursor:pointer;padding:4px 5px;border-radius:5px;font-size:15px;transition:all .15s;opacity:.6;-webkit-tap-highlight-color:transparent}
+.act-btn:hover{opacity:1;background:var(--dew)}
+.empty-state{text-align:center;padding:48px 20px;color:var(--stone)}
+.empty-ic{font-size:44px;margin-bottom:10px;opacity:.5}
+
+/* RECORD CARDS (mobile-friendly alternative) */
+.record-cards{display:none;flex-direction:column;gap:10px}
+.rec-card{background:#fff;border-radius:12px;border:1px solid rgba(122,171,94,.2);padding:14px;box-shadow:0 1px 8px rgba(45,74,30,.05)}
+.rec-card-top{display:flex;align-items:start;justify-content:space-between;gap:10px;margin-bottom:8px}
+.rec-card-name{font-weight:600;font-size:14px;color:var(--ink)}
+.rec-card-sci{font-style:italic;font-size:11px;color:var(--stone)}
+.rec-card-meta{font-size:11px;color:var(--stone);font-family:'Space Mono',monospace;margin-bottom:6px}
+.rec-card-actions{display:flex;gap:6px;margin-top:8px}
+
+/* MODAL */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:200;display:flex;align-items:flex-end;justify-content:center;padding:0;opacity:0;pointer-events:none;transition:opacity .2s}
+.modal-overlay.open{opacity:1;pointer-events:all}
+.modal{background:#fff;border-radius:20px 20px 0 0;width:100%;max-width:680px;max-height:92vh;overflow-y:auto;box-shadow:0 -8px 40px rgba(0,0,0,.2);transform:translateY(40px);transition:transform .25s}
+.modal-overlay.open .modal{transform:translateY(0)}
+.modal-hd{padding:16px 20px 12px;border-bottom:1px solid var(--mist);display:flex;justify-content:space-between;align-items:start;position:sticky;top:0;background:#fff;z-index:1}
+.modal-drag{width:36px;height:4px;background:var(--mist);border-radius:2px;margin:0 auto 12px;display:block}
+.modal-title{font-family:'Noto Serif JP',serif;font-size:17px;font-weight:700;color:var(--moss)}
+.modal-close{background:none;border:none;font-size:22px;cursor:pointer;color:var(--stone);line-height:1;padding:0}
+.modal-body{padding:16px 20px}
+.det-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
+.det-item label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--stone);display:block;margin-bottom:2px}
+.det-item .val{font-size:13px;color:var(--ink);font-weight:500}
+.det-item.full{grid-column:1/-1}
+.notes-box{background:var(--cream);border:1px solid var(--mist);border-radius:8px;padding:10px;font-size:12px;line-height:1.8;white-space:pre-wrap;margin-top:3px}
+.sec-div{margin:14px 0 10px;font-size:10px;font-weight:600;color:var(--stone);text-transform:uppercase;letter-spacing:.06em;display:flex;align-items:center;gap:8px}
+.sec-div::before,.sec-div::after{content:'';flex:1;height:1px;background:var(--mist)}
+
+/* ID CHECK */
+.id-panel{background:var(--dew);border:1px solid var(--mist);border-radius:10px;padding:14px;margin-bottom:12px}
+.id-panel h3{font-size:12px;font-weight:600;color:var(--moss);margin-bottom:10px}
+.id-status-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+.id-s-btn{padding:7px 12px;border-radius:18px;border:1.5px solid var(--mist);background:#fff;cursor:pointer;font-size:11px;font-family:'Noto Sans JP',sans-serif;transition:all .2s}
+.id-s-btn.ok.sel{background:rgba(26,124,74,.12);border-color:var(--check-ok);color:var(--check-ok);font-weight:600}
+.id-s-btn.warn.sel{background:rgba(184,122,0,.12);border-color:var(--check-warn);color:var(--check-warn);font-weight:600}
+.id-s-btn.ng.sel{background:rgba(192,57,43,.12);border-color:var(--check-ng);color:var(--check-ng);font-weight:600}
+.id-entry{background:#fff;border-radius:8px;padding:9px 11px;border-left:3px solid var(--mist);font-size:12px;margin-bottom:6px}
+.id-entry.ok{border-color:var(--check-ok)}
+.id-entry.warn{border-color:var(--check-warn)}
+.id-entry.ng{border-color:var(--check-ng)}
+.id-entry-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;flex-wrap:wrap;gap:4px}
+.id-entry-meta{font-size:10px;color:var(--stone);font-family:'Space Mono',monospace}
+
+/* TRASH */
+.trash-item{background:#fff;border-radius:10px;border:1px solid rgba(192,57,43,.2);padding:12px 16px;margin-bottom:8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.trash-info-block{flex:1;min-width:0}
+.trash-name{font-weight:600;font-size:13px}
+.trash-meta{font-size:11px;color:var(--stone);font-family:'Space Mono',monospace;margin-top:2px}
+.trash-del-date{font-size:10px;color:var(--error);margin-top:2px}
+.btn-restore{padding:6px 12px;background:var(--dew);border:1.5px solid var(--fern);border-radius:7px;color:var(--fern);font-size:11px;cursor:pointer;font-family:'Noto Sans JP',sans-serif;transition:all .2s}
+.btn-restore:hover{background:var(--fern);color:#fff}
+.btn-pdel{padding:6px 12px;background:rgba(192,57,43,.06);border:1.5px solid rgba(192,57,43,.3);border-radius:7px;color:var(--error);font-size:11px;cursor:pointer;font-family:'Noto Sans JP',sans-serif;transition:all .2s}
+.btn-pdel:hover{background:var(--error);color:#fff}
+
+/* REPORT */
+.chk-group{display:flex;flex-direction:column;gap:6px}
+.chk-item{display:flex;align-items:center;gap:8px;padding:9px 12px;border:1.5px solid var(--mist);border-radius:9px;cursor:pointer;transition:all .2s;user-select:none}
+.chk-item:hover{border-color:var(--sage)}
+.chk-item.checked{border-color:var(--fern);background:var(--dew)}
+.chk-item input{accent-color:var(--fern);width:14px;height:14px;margin:0;cursor:pointer;flex-shrink:0}
+.chk-label{font-size:12px}
+.chk-desc{font-size:10px;color:var(--stone);margin-left:auto}
+.btn-gen{width:100%;padding:14px;background:linear-gradient(135deg,var(--moss),var(--fern));color:#fff;border:none;border-radius:11px;font-family:'Noto Serif JP',serif;font-size:14px;font-weight:700;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 4px 14px rgba(45,74,30,.2);margin-top:14px}
+.btn-gen:disabled{opacity:.5;cursor:not-allowed}
+
+/* ADMIN PAGE */
+.admin-table-wrap{background:#fff;border-radius:12px;border:1px solid rgba(122,171,94,.2);overflow:hidden}
+.admin-table{width:100%;border-collapse:collapse;font-size:13px}
+.admin-table th{background:var(--moss);color:#fff;padding:10px 14px;text-align:left;font-weight:500}
+.admin-table td{padding:10px 14px;border-bottom:1px solid var(--mist)}
+.admin-table tr:last-child td{border-bottom:none}
+.role-sel{font-size:12px;padding:4px 8px;border:1px solid var(--mist);border-radius:6px;background:var(--cream)}
+
+/* TOAST */
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--moss);color:#fff;padding:11px 22px;border-radius:24px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.25);opacity:0;transition:all .3s;z-index:1000;pointer-events:none;white-space:nowrap;max-width:90vw;text-align:center}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* LIGHTBOX */
+.lightbox{position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:300;display:none;align-items:center;justify-content:center}
+.lightbox.open{display:flex}
+.lightbox img{max-width:92vw;max-height:88vh;object-fit:contain;border-radius:4px}
+.lb-close{position:fixed;top:16px;right:18px;background:none;border:none;color:#fff;font-size:28px;cursor:pointer;opacity:.7;-webkit-tap-highlight-color:transparent}
+
+/* SYNC STATUS */
+.sync-dot{width:7px;height:7px;border-radius:50%;background:var(--sage);display:inline-block;margin-right:4px}
+.sync-dot.syncing{background:var(--amber);animation:pulse .8s ease-in-out infinite}
+.sync-dot.error{background:var(--error)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* PHOTO THUMBS */
+.photo-drop{border:2px dashed var(--mist);border-radius:10px;padding:18px;text-align:center;cursor:pointer;transition:all .2s;background:var(--cream)}
+.photo-drop:hover,.photo-drop.drag{border-color:var(--fern);background:var(--dew)}
+.photo-drop .pd-icon{font-size:26px;margin-bottom:6px}
+.photo-drop p{font-size:12px;color:var(--stone)}
+.photo-drop input{display:none}
+.thumb-list{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}
+.thumb-w{position:relative;width:72px;height:72px;border-radius:7px;overflow:hidden;border:2px solid var(--mist)}
+.thumb-w img{width:100%;height:100%;object-fit:cover}
+.thumb-del{position:absolute;top:2px;right:2px;background:rgba(192,57,43,.85);color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1}
+.photo-grid img{width:100px;height:100px;object-fit:cover;border-radius:7px;border:1px solid var(--mist);cursor:pointer;transition:transform .15s}
+.photo-grid img:hover{transform:scale(1.04)}
+.photo-grid{display:flex;flex-wrap:wrap;gap:7px;margin-top:5px}
+
+@media(max-width:640px){
+  .fg-row{grid-template-columns:1fr}
+  .det-grid{grid-template-columns:1fr}
+  .header-inner{padding:8px 14px}
+  .main{padding:12px}
+  .tbl-wrap{display:none}
+  .record-cards{display:flex}
+  .db-toolbar .filter-sel{display:none}
+  .user-name{display:none}
+}
+@media(min-width:641px){
+  .modal{align-self:center;border-radius:20px;max-height:86vh;margin:auto}
+  .modal-overlay{align-items:center;padding:20px}
+}
+</style>
+</head>
+<body>
+
+<!-- OFFLINE BANNER -->
+<div class="offline-banner" id="offlineBanner">📡 オフライン中 — ネットワークが回復すると自動で同期されます</div>
+
+<!-- LOGIN SCREEN -->
+<div class="login-screen" id="loginScreen">
+  <div class="login-box">
+    <div class="login-logo">🌿</div>
+    <div class="login-title">生物観察データベース</div>
+    <div class="login-sub">Field Observation System</div>
+    <div class="login-desc">市民調査・研究機関向けの<br>クラウド生物観察記録システムです。<br>Googleアカウントでログインしてください。</div>
+    <button class="btn-google" onclick="doLogin()">
+      <svg viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+      Googleアカウントでログイン
+    </button>
+    <div class="login-note">ログイン情報はGoogleによって安全に管理されます。<br>初回ログイン後、管理者による権限設定が必要な場合があります。</div>
+  </div>
+</div>
+
+<!-- LOADING -->
+<div class="loading-overlay hidden" id="loadingOverlay">
+  <div class="loading-spinner"></div>
+  <div class="loading-text" id="loadingText">読み込み中...</div>
+</div>
+
+<!-- HEADER -->
+<header id="appHeader" style="display:none">
+  <div class="header-inner">
+    <div class="logo">
+      <div class="logo-icon">🌿</div>
+      <div class="logo-text">
+        <div class="logo-title">生物観察DB</div>
+        <div class="logo-sub"><span class="sync-dot" id="syncDot"></span>Cloud Sync</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="user-pill" id="userPill">
+        <img class="user-avatar" id="userAvatar" src="" alt="">
+        <span class="user-name" id="userName"></span>
+        <span class="user-role" id="userRoleBadge"></span>
+      </div>
+      <button class="btn-signout" onclick="doSignOut()">ログアウト</button>
+    </div>
+  </div>
+</header>
+<nav id="appNav" style="display:none">
+  <div class="nav-inner">
+    <button class="nav-tab active" onclick="showPage('input')">📝 記録入力</button>
+    <button class="nav-tab" onclick="showPage('database')">🗄 一覧</button>
+    <button class="nav-tab admin-only" id="tabReport" onclick="showPage('report')">📄 レポート</button>
+    <button class="nav-tab admin-only" id="tabTrash" onclick="showPage('trash')" style="position:relative">🗑 ゴミ箱<span class="badge" id="trashBadge"></span></button>
+    <button class="nav-tab admin-only" id="tabAdmin" onclick="showPage('admin')">⚙️ 管理</button>
+  </div>
+</nav>
+
+<!-- MAIN -->
+<div class="main" id="appMain" style="display:none">
+
+<!-- INPUT PAGE -->
+<div id="page-input" class="page active">
+  <!-- Copy banner -->
+  <div class="copy-banner" id="copyBanner">
+    <div class="copy-banner-top">
+      <span class="copy-banner-label">📋 直前の記録から環境をコピー</span>
+      <button class="btn-copy" onclick="applyCopy()">コピーする</button>
+    </div>
+    <div class="copy-banner-prev" id="copyPrev"></div>
+    <div class="copy-checks" id="copyChecks">
+      <label class="copy-chk on" data-f="date"><input type="checkbox" checked>日付</label>
+      <label class="copy-chk on" data-f="time"><input type="checkbox" checked>時刻</label>
+      <label class="copy-chk on" data-f="location"><input type="checkbox" checked>地点</label>
+      <label class="copy-chk on" data-f="coords"><input type="checkbox" checked>GPS</label>
+      <label class="copy-chk on" data-f="weather"><input type="checkbox" checked>天候</label>
+      <label class="copy-chk on" data-f="temp"><input type="checkbox" checked>気温</label>
+      <label class="copy-chk on" data-f="observer"><input type="checkbox" checked>観察者</label>
+      <label class="copy-chk on" data-f="method"><input type="checkbox" checked>記録方法</label>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-hd"><div class="card-hd-icon">📝</div><div><h2>観察記録の入力</h2><p>新しい観察を記録します</p></div></div>
+    <div class="card-body">
+
+      <div class="fg">
+        <label class="lbl">生物カテゴリ <span class="req">*</span></label>
+        <div class="cat-grid">
+          <button class="cat-btn" data-cat="植物" onclick="selCat(this)"><span class="ci">🌱</span><span class="cl">植物</span></button>
+          <button class="cat-btn" data-cat="昆虫・節足動物" onclick="selCat(this)"><span class="ci">🦋</span><span class="cl">昆虫・節足</span></button>
+          <button class="cat-btn" data-cat="鳥類" onclick="selCat(this)"><span class="ci">🐦</span><span class="cl">鳥類</span></button>
+          <button class="cat-btn" data-cat="魚類・水生生物" onclick="selCat(this)"><span class="ci">🐟</span><span class="cl">魚類・水生</span></button>
+          <button class="cat-btn" data-cat="哺乳類" onclick="selCat(this)"><span class="ci">🦌</span><span class="cl">哺乳類</span></button>
+          <button class="cat-btn" data-cat="その他" onclick="selCat(this)"><span class="ci">🔬</span><span class="cl">その他</span></button>
+        </div>
+        <input type="hidden" id="fCat">
+      </div>
+
+      <div class="fg-row">
+        <div class="fg"><label class="lbl">種名（和名）<span class="req">*</span></label><input type="text" id="fName" placeholder="例: ヤマトシジミ"></div>
+        <div class="fg"><label class="lbl">学名</label><input type="text" id="fSci" placeholder="例: Zizeeria maha" style="font-style:italic"></div>
+      </div>
+
+      <div class="fg-row">
+        <div class="fg"><label class="lbl">観察日 <span class="req">*</span></label><input type="date" id="fDate"></div>
+        <div class="fg"><label class="lbl">観察時刻</label><input type="time" id="fTime"></div>
+      </div>
+
+      <div class="fg-row">
+        <div class="fg"><label class="lbl">調査地点名 <span class="req">*</span></label><input type="text" id="fLoc" placeholder="例: 高尾山 5号路"></div>
+        <div class="fg"><label class="lbl">個体数</label><input type="number" id="fCount" placeholder="例: 3" min="1"></div>
+      </div>
+
+      <div class="fg">
+        <label class="lbl">📍 GPS座標 <span style="font-size:10px;text-transform:none;font-weight:400">（GoogleマップのURLを貼り付け）</span></label>
+        <div class="gps-row">
+          <input type="text" id="fGpsUrl" placeholder="https://maps.app.goo.gl/... を貼り付け" oninput="parseGps(this.value)">
+          <button class="btn-paste" onclick="pasteGps()">📋</button>
+        </div>
+        <div id="coordsRow" style="display:none" class="coords-row">
+          <div class="coord-box"><div class="coord-lbl">緯度</div><div id="dLat">—</div></div>
+          <div class="coord-box"><div class="coord-lbl">経度</div><div id="dLng">—</div></div>
+          <a class="map-link" id="mapLink" href="#" target="_blank">🗺 確認</a>
+        </div>
+        <input type="hidden" id="fLat"><input type="hidden" id="fLng">
+      </div>
+
+      <div class="fg-row">
+        <div class="fg">
+          <label class="lbl">天候</label>
+          <div class="opt-row" id="weatherRow">
+            <button class="opt-btn" data-val="晴れ" onclick="selOpt(this,'w')">☀️ 晴れ</button>
+            <button class="opt-btn" data-val="曇り" onclick="selOpt(this,'w')">☁️ 曇り</button>
+            <button class="opt-btn" data-val="雨" onclick="selOpt(this,'w')">🌧️ 雨</button>
+            <button class="opt-btn" data-val="雪" onclick="selOpt(this,'w')">❄️ 雪</button>
+            <button class="opt-btn" data-val="霧" onclick="selOpt(this,'w')">🌫️ 霧</button>
+          </div>
+          <input type="hidden" id="fWeather">
+        </div>
+        <div class="fg"><label class="lbl">気温（℃）</label><input type="number" id="fTemp" placeholder="例: 18" step="0.1"></div>
+      </div>
+
+      <div class="fg">
+        <label class="lbl">観察コンディション <span style="font-size:10px;text-transform:none;font-weight:400;letter-spacing:0">（生息地・個体の保全状況）</span></label>
+        <div class="opt-row">
+          <button class="opt-btn" data-val="良好" onclick="selOpt(this,'c')" title="個体数・生息環境ともに安定">✅ 良好</button>
+          <button class="opt-btn" data-val="普通" onclick="selOpt(this,'c')" title="特段の問題なし">➖ 普通</button>
+          <button class="opt-btn" data-val="要注意" onclick="selOpt(this,'c')" title="個体数減少・環境悪化など継続監視が必要">⚠️ 要注意</button>
+          <button class="opt-btn" data-val="危機的" onclick="selOpt(this,'c')" title="極めて少数・生息地破壊・絶滅危惧。緊急対応が必要">🚨 危機的</button>
+        </div>
+        <div class="cond-desc" id="condDesc"></div>
+        <input type="hidden" id="fCond">
+      </div>
+
+      <div class="fg">
+        <label class="lbl">生活史ステージ</label>
+        <div class="opt-row" id="stageRow">
+          <button class="opt-btn" onclick="togTag(this)">🥚 卵</button>
+          <button class="opt-btn" onclick="togTag(this)">🐛 幼体・幼虫・幼鳥</button>
+          <button class="opt-btn" onclick="togTag(this)">🦋 成体・成虫・成鳥</button>
+          <button class="opt-btn" onclick="togTag(this)">❓ 不明</button>
+        </div>
+      </div>
+
+      <div class="fg">
+        <label class="lbl">行動・観察内容</label>
+        <div class="opt-row" id="behavRow">
+          <button class="opt-btn" onclick="togTag(this)">採餌</button>
+          <button class="opt-btn" onclick="togTag(this)">移動</button>
+          <button class="opt-btn" onclick="togTag(this)">繁殖行動</button>
+          <button class="opt-btn" onclick="togTag(this)">休息</button>
+          <button class="opt-btn" onclick="togTag(this)">鳴き声</button>
+          <button class="opt-btn" onclick="togTag(this)">開花</button>
+          <button class="opt-btn" onclick="togTag(this)">結実</button>
+        </div>
+        <div class="opt-row" id="signRow" style="margin-top:6px">
+          <button class="opt-btn" onclick="togTag(this)" title="足跡の確認">🐾 足跡</button>
+          <button class="opt-btn" onclick="togTag(this)" title="糞・排泄物">💩 糞</button>
+          <button class="opt-btn" onclick="togTag(this)" title="土や落葉を掘り返した痕">⛏ 掘り返し</button>
+          <button class="opt-btn" onclick="togTag(this)" title="巣・巣穴・巣材">🪺 巣</button>
+          <button class="opt-btn" onclick="togTag(this)" title="動物が繰り返し通る道">🛤 獣道</button>
+          <button class="opt-btn" onclick="togTag(this)" title="樹皮剥ぎ・果実の食べ痕など">🦷 食痕</button>
+        </div>
+        <div class="sign-hint">下段：痕跡・フィールドサイン（直接目視できない場合も記録可）</div>
+      </div>
+
+      <div class="fg">
+        <label class="lbl">観察メモ・特記事項</label>
+        <textarea id="fNotes" placeholder="形態の特徴、生息環境、特筆すべき行動など..."></textarea>
+      </div>
+
+      <div class="fg-row">
+        <div class="fg"><label class="lbl">観察者名</label><input type="text" id="fObserver" placeholder="例: 田中 太郎"></div>
+        <div class="fg"><label class="lbl">記録方法</label>
+          <select id="fMethod">
+            <option value="">選択</option>
+            <option>目視</option><option>写真撮影</option><option>動画撮影</option>
+            <option>音声録音</option><option>標本採集</option><option>トラップ調査</option><option>ドローン調査</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="fg">
+        <label class="lbl">📷 写真</label>
+        <div class="photo-drop" onclick="document.getElementById('photoIn').click()" ondragover="ev=>ev.preventDefault()" ondrop="handleDrop(event)" id="photoDrop">
+          <div class="pd-icon">📷</div>
+          <p>タップ/クリックまたはドラッグで追加<br><span style="font-size:10px">複数枚OK · JPG/PNG/WEBP</span></p>
+          <input type="file" id="photoIn" accept="image/*" multiple onchange="handlePhotoSel(this)">
+        </div>
+        <div class="thumb-list" id="thumbList"></div>
+      </div>
+
+      <button class="btn-submit" id="btnSave" onclick="saveRecord()">🌿 記録を保存する</button>
+    </div>
+  </div>
+</div>
+
+<!-- DATABASE PAGE -->
+<div id="page-database" class="page">
+  <div class="db-toolbar">
+    <div class="search-wrap"><span class="search-ic">🔍</span><input type="text" id="srch" placeholder="種名・地点で検索..." oninput="renderDb()"></div>
+    <select class="filter-sel" id="fltrCat" onchange="renderDb()">
+      <option value="">全カテゴリ</option>
+      <option>植物</option><option>昆虫・節足動物</option><option>鳥類</option>
+      <option>魚類・水生生物</option><option>哺乳類</option><option>その他</option>
+    </select>
+    <select class="filter-sel" id="fltrId" onchange="renderDb()">
+      <option value="">同定ステータス全て</option>
+      <option value="ok">✅ 承認済</option>
+      <option value="warn">⚠️ 要確認</option>
+      <option value="ng">❌ 却下</option>
+      <option value="none">— 未チェック</option>
+    </select>
+    <button class="btn-sec" onclick="exportCSV()">📊 CSV</button>
+  </div>
+  <!-- Desktop table -->
+  <div class="tbl-wrap"><div class="tbl-scroll">
+    <table>
+      <thead><tr>
+        <th>カテゴリ</th><th>種名</th><th>観察日</th><th>地点</th><th>個体数</th><th>同定</th><th>操作</th>
+      </tr></thead>
+      <tbody id="tblBody"></tbody>
+    </table>
+  </div></div>
+  <!-- Mobile cards -->
+  <div class="record-cards" id="recCards"></div>
+</div>
+
+<!-- REPORT PAGE -->
+<div id="page-report" class="page">
+  <div class="card">
+    <div class="card-hd"><div class="card-hd-icon">📄</div><div><h2>Wordレポート生成</h2></div></div>
+    <div class="card-body">
+      <div class="fg"><label class="lbl">タイトル</label><input type="text" id="rpTitle" value="生物相調査報告書"></div>
+      <div class="fg-row">
+        <div class="fg"><label class="lbl">調査者</label><input type="text" id="rpAuthor"></div>
+        <div class="fg"><label class="lbl">所属機関</label><input type="text" id="rpOrg"></div>
+        <div class="fg"><label class="lbl">期間（開始）</label><input type="date" id="rpFrom"></div>
+        <div class="fg"><label class="lbl">期間（終了）</label><input type="date" id="rpTo"></div>
+      </div>
+      <div class="fg-row">
+        <div class="fg"><label class="lbl">カテゴリ絞り込み</label>
+          <select id="rpCat"><option value="">すべて</option><option>植物</option><option>昆虫・節足動物</option><option>鳥類</option><option>魚類・水生生物</option><option>哺乳類</option><option>その他</option></select>
+        </div>
+        <div class="fg"><label class="lbl">同定フィルター</label>
+          <select id="rpIdF"><option value="">全て</option><option value="ok">承認済のみ</option><option value="checked">承認+要確認</option></select>
+        </div>
+      </div>
+      <div class="fg"><label class="lbl">含めるセクション</label>
+        <div class="chk-group">
+          <label class="chk-item checked" id="ck-sum" onclick="togCk(this)"><input type="checkbox" checked><span class="chk-label">📊 調査概要</span></label>
+          <label class="chk-item checked" id="ck-list" onclick="togCk(this)"><input type="checkbox" checked><span class="chk-label">📋 確認種リスト</span></label>
+          <label class="chk-item checked" id="ck-det" onclick="togCk(this)"><input type="checkbox" checked><span class="chk-label">🔍 個別観察記録</span></label>
+          <label class="chk-item" id="ck-stats" onclick="togCk(this)"><input type="checkbox"><span class="chk-label">📈 カテゴリ別集計</span></label>
+          <label class="chk-item" id="ck-loc" onclick="togCk(this)"><input type="checkbox"><span class="chk-label">📍 地点別集計</span></label>
+        </div>
+      </div>
+      <div class="fg"><label class="lbl">調査目的・概要</label><textarea id="rpAbs" style="min-height:80px"></textarea></div>
+      <button class="btn-gen" onclick="genDocx()" id="btnGen">📄 Word文書を生成・ダウンロード</button>
+    </div>
+  </div>
+</div>
+
+<!-- TRASH PAGE -->
+<div id="page-trash" class="page">
+  <div class="card">
+    <div class="card-hd"><div class="card-hd-icon">🗑</div><div><h2>ゴミ箱</h2><p>削除された記録</p></div></div>
+    <div class="card-body">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+        <span style="font-size:13px;color:var(--stone)" id="trashInfo">ゴミ箱は空です</span>
+        <button class="btn-sec" style="color:var(--error);border-color:rgba(192,57,43,.3)" onclick="emptyTrash()">🗑 すべて完全削除</button>
+      </div>
+      <div id="trashList"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ADMIN PAGE -->
+<div id="page-admin" class="page">
+  <div class="card">
+    <div class="card-hd"><div class="card-hd-icon">⚙️</div><div><h2>ユーザー管理</h2><p>権限の設定（管理者のみ）</p></div></div>
+    <div class="card-body">
+      <p style="font-size:12px;color:var(--stone);margin-bottom:14px;line-height:1.7">
+        ここでログインしたユーザーの権限を設定できます。<br>
+        <b>admin</b>：全データ閲覧・編集・レポート出力・ユーザー管理<br>
+        <b>member</b>：観察記録の入力・自分の記録の閲覧のみ
+      </p>
+      <div class="admin-table-wrap">
+        <table class="admin-table">
+          <thead><tr><th>ユーザー</th><th>メール</th><th>初回ログイン</th><th>権限</th></tr></thead>
+          <tbody id="adminTbl"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /main -->
+
+<!-- DETAIL MODAL -->
+<div class="modal-overlay" id="detailMo" onclick="closeMo(event,'detailMo')">
+  <div class="modal">
+    <div class="modal-hd">
+      <div><div class="modal-title" id="moTitle"></div><div style="font-size:11px;color:var(--stone);margin-top:2px" id="moSub"></div></div>
+      <button class="modal-close" onclick="closeMoDirect('detailMo')">✕</button>
+    </div>
+    <div class="modal-body" id="moBody"></div>
+  </div>
+</div>
+
+<!-- ID CHECK MODAL -->
+<div class="modal-overlay" id="idMo" onclick="closeMo(event,'idMo')">
+  <div class="modal">
+    <div class="modal-hd">
+      <div><div class="modal-title">🔍 同定チェック</div><div style="font-size:11px;color:var(--stone);margin-top:2px" id="idMoSub"></div></div>
+      <button class="modal-close" onclick="closeMoDirect('idMo')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="id-panel">
+        <h3>チェック内容を登録</h3>
+        <div class="fg-row">
+          <div class="fg"><label class="lbl">チェック者名 <span class="req">*</span></label><input type="text" id="idChecker" placeholder="例: 鈴木 専門家"></div>
+          <div class="fg"><label class="lbl">チェック日</label><input type="date" id="idDate"></div>
+        </div>
+        <div class="fg" style="margin-top:8px"><label class="lbl">ステータス <span class="req">*</span></label>
+          <div class="id-status-row">
+            <button class="id-s-btn ok" data-s="ok" onclick="selIdS(this)">✅ 承認（同定確認）</button>
+            <button class="id-s-btn warn" data-s="warn" onclick="selIdS(this)">⚠️ 要確認</button>
+            <button class="id-s-btn ng" data-s="ng" onclick="selIdS(this)">❌ 却下</button>
+          </div>
+          <input type="hidden" id="idStatus">
+        </div>
+        <div class="fg" style="margin-top:8px"><label class="lbl">コメント・根拠</label><textarea id="idComment" placeholder="分布適合性、形態確認、参考文献など..." style="min-height:72px"></textarea></div>
+        <button class="btn-submit" style="margin-top:10px" onclick="saveIdCheck()">✅ 保存する</button>
+      </div>
+      <div id="idHistory"></div>
+    </div>
+  </div>
+</div>
+
+<div class="lightbox" id="lightbox" onclick="this.classList.remove('open')">
+  <button class="lb-close">✕</button>
+  <img id="lbImg" src="" alt="">
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const CAT_ICONS={植物:'🌱','昆虫・節足動物':'🦋',鳥類:'🐦','魚類・水生生物':'🐟',哺乳類:'🦌',その他:'🔬'};
+const ID_LABELS={ok:{t:'承認済',c:'id-ok',i:'✅'},warn:{t:'要確認',c:'id-warn',i:'⚠️'},ng:{t:'却下',c:'id-ng',i:'❌'},none:{t:'未チェック',c:'id-none',i:'—'}};
+const COND_DESCS={'良好':'個体数・生息環境ともに安定。特段の懸念なし。','普通':'目立った問題はないが、積極的に良好とも言えない状態。','要注意':'個体数の減少・生息環境の悪化・外来種との競合など、継続的なモニタリングが必要な状態。','危機的':'個体数が極めて少ない・生息地が著しく破壊・絶滅の恐れがある状態。緊急対応が必要。'};
+
+let fb, currentUser, userRole='member', records=[], trashRecs=[];
+let currentIdRecId=null, pendingPhotos=[];
+
+// Wait for Firebase
+document.addEventListener('fbReady', initApp);
+if(window._fbReady) initApp();
+
+function initApp(){
+  fb = window._fb;
+  fb.onAuthStateChanged(fb.auth, async user => {
+    if(user){
+      currentUser = user;
+      await ensureUserDoc(user);
+      userRole = await getUserRole(user.uid);
+      showApp();
+      setupRealtime();
+    } else {
+      currentUser = null;
+      showLoginScreen();
+    }
+  });
+}
+
+async function ensureUserDoc(user){
+  const {db,doc,getDoc,setDoc,serverTimestamp} = fb;
+  const ref = doc(db,'users',user.uid);
+  const snap = await getDoc(ref);
+  if(!snap.exists()){
+    await setDoc(ref,{
+      name: user.displayName,
+      email: user.email,
+      photo: user.photoURL,
+      role: 'member', // 初回はmember
+      firstLogin: serverTimestamp(),
+      lastLogin: serverTimestamp()
+    });
+  } else {
+    await fb.updateDoc(ref,{lastLogin: serverTimestamp(), name: user.displayName, photo: user.photoURL});
+  }
+}
+
+async function getUserRole(uid){
+  const {db,doc,getDoc} = fb;
+  const snap = await getDoc(doc(db,'users',uid));
+  return snap.exists() ? (snap.data().role||'member') : 'member';
+}
+
+function showApp(){
+  document.getElementById('loginScreen').classList.add('hidden');
+  document.getElementById('appHeader').style.display='block';
+  document.getElementById('appNav').style.display='block';
+  document.getElementById('appMain').style.display='block';
+
+  // User pill
+  document.getElementById('userAvatar').src = currentUser.photoURL||'';
+  document.getElementById('userName').textContent = currentUser.displayName||currentUser.email;
+  const roleEl = document.getElementById('userRoleBadge');
+  roleEl.textContent = userRole==='admin'?'管理者':'メンバー';
+  roleEl.className = 'user-role '+(userRole==='admin'?'role-admin':'role-member');
+
+  // Admin tabs
+  if(userRole==='admin'){
+    document.querySelectorAll('.admin-only').forEach(el=>el.classList.add('unlocked'));
+  }
+
+  // Default date
+  document.getElementById('fDate').value = new Date().toISOString().slice(0,10);
+  document.getElementById('idDate').value = new Date().toISOString().slice(0,10);
+
+  // Copy banner checkbox behavior
+  document.querySelectorAll('.copy-chk').forEach(lbl=>{
+    const cb = lbl.querySelector('input');
+    const toggle = ()=>lbl.classList.toggle('on',cb.checked);
+    cb.onchange = toggle;
+  });
+
+  // Photo drop events
+  const drop = document.getElementById('photoDrop');
+  drop.addEventListener('dragover',e=>{e.preventDefault();drop.classList.add('drag')});
+  drop.addEventListener('dragleave',()=>drop.classList.remove('drag'));
+
+  // Offline detection
+  window.addEventListener('online',()=>document.getElementById('offlineBanner').classList.remove('visible'));
+  window.addEventListener('offline',()=>document.getElementById('offlineBanner').classList.add('visible'));
+}
+
+function showLoginScreen(){
+  document.getElementById('loginScreen').classList.remove('hidden');
+  document.getElementById('appHeader').style.display='none';
+  document.getElementById('appNav').style.display='none';
+  document.getElementById('appMain').style.display='none';
+}
+
+async function doLogin(){
+  try{
+    const provider = new fb.GoogleAuthProvider();
+    await fb.signInWithPopup(fb.auth, provider);
+  } catch(e){ showToast('❌ ログインに失敗しました: '+e.message); }
+}
+
+async function doSignOut(){
+  await fb.signOut(fb.auth);
+  records=[];trashRecs=[];
+}
+
+// ===========================
+// REALTIME SYNC
+// ===========================
+function setupRealtime(){
+  const {db,collection,query,orderBy,onSnapshot} = fb;
+  setSyncing(true);
+
+  // Active records
+  const q = query(collection(db,'records'), orderBy('date','desc'));
+  onSnapshot(q, snap=>{
+    records = snap.docs.map(d=>({id:d.id,...d.data()}));
+    setSyncing(false);
+    renderDb();
+    updateCopyBanner();
+    updateStats();
+  }, err=>{ setSyncing(false,'error'); console.error(err); });
+
+  // Trash (admin only)
+  if(userRole==='admin'){
+    const tq = query(collection(db,'trash'), orderBy('deletedAt','desc'));
+    onSnapshot(tq, snap=>{
+      trashRecs = snap.docs.map(d=>({id:d.id,...d.data()}));
+      renderTrash();
+      const badge = document.getElementById('trashBadge');
+      badge.textContent = trashRecs.length;
+      badge.classList.toggle('visible', trashRecs.length>0);
+    });
+
+    // Users for admin
+    const uq = query(collection(db,'users'), orderBy('firstLogin','desc'));
+    onSnapshot(uq, snap=>{
+      renderAdminUsers(snap.docs.map(d=>({id:d.id,...d.data()})));
+    });
+  }
+}
+
+function setSyncing(on, state=''){
+  const dot = document.getElementById('syncDot');
+  dot.className = 'sync-dot'+(on?' syncing':state?' '+state:'');
+}
+
+function updateStats(){
+  // Could add stat pills if needed
+}
+
+// ===========================
+// FORM HELPERS
+// ===========================
+function selCat(btn){
+  document.querySelectorAll('.cat-btn').forEach(b=>b.classList.remove('sel'));
+  btn.classList.add('sel');
+  document.getElementById('fCat').value=btn.dataset.cat;
+}
+function selOpt(btn,key){
+  const row=btn.closest('.opt-row');
+  row.querySelectorAll('.opt-btn').forEach(b=>b.classList.remove('sel'));
+  btn.classList.add('sel');
+  document.getElementById(key==='w'?'fWeather':'fCond').value=btn.dataset.val;
+  if(key==='c'){
+    const d=document.getElementById('condDesc');
+    d.textContent=COND_DESCS[btn.dataset.val]||'';
+    d.style.display='block';
+  }
+}
+function togTag(btn){btn.classList.toggle('sel');}
+function getTags(){
+  return Array.from(document.querySelectorAll('#stageRow .opt-btn.sel,#behavRow .opt-btn.sel,#signRow .opt-btn.sel'))
+    .map(b=>b.textContent.trim());
+}
+
+// GPS
+function parseGps(url){
+  if(!url) return;
+  const pats=[/@(-?\d+\.\d+),(-?\d+\.\d+)/,/[?&]ll=(-?\d+\.\d+),(-?\d+\.\d+)/,/[?&]q=(-?\d+\.\d+),(-?\d+\.\d+)/,/(-?\d{1,3}\.\d{4,})[, ]+(-?\d{1,3}\.\d{4,})/];
+  for(const p of pats){const m=url.match(p);if(m){setCoords(parseFloat(m[1]),parseFloat(m[2]));return;}}
+}
+function setCoords(lat,lng){
+  if(Math.abs(lat)>90||Math.abs(lng)>180) return;
+  document.getElementById('fLat').value=lat;
+  document.getElementById('fLng').value=lng;
+  document.getElementById('dLat').textContent=lat.toFixed(6);
+  document.getElementById('dLng').textContent=lng.toFixed(6);
+  document.getElementById('mapLink').href=`https://www.google.com/maps?q=${lat},${lng}`;
+  document.getElementById('coordsRow').style.display='flex';
+}
+async function pasteGps(){
+  try{const t=await navigator.clipboard.readText();document.getElementById('fGpsUrl').value=t;parseGps(t);}
+  catch{showToast('📋 URLを入力欄に直接貼り付けてください');}
+}
+
+// Photos
+function handlePhotoSel(inp){Array.from(inp.files).forEach(addPhoto);inp.value='';}
+function handleDrop(e){e.preventDefault();document.getElementById('photoDrop').classList.remove('drag');Array.from(e.dataTransfer.files).filter(f=>f.type.startsWith('image/')).forEach(addPhoto);}
+function addPhoto(file){
+  const r=new FileReader();
+  r.onload=e=>{pendingPhotos.push({dataUrl:e.target.result,name:file.name});renderThumbs();};
+  r.readAsDataURL(file);
+}
+function renderThumbs(){
+  document.getElementById('thumbList').innerHTML=pendingPhotos.map((p,i)=>`
+    <div class="thumb-w"><img src="${p.dataUrl}" alt=""><button class="thumb-del" onclick="pendingPhotos.splice(${i},1);renderThumbs()">✕</button></div>`).join('');
+}
+
+// ===========================
+// SAVE RECORD
+// ===========================
+async function saveRecord(){
+  const name=document.getElementById('fName').value.trim();
+  const cat=document.getElementById('fCat').value;
+  const date=document.getElementById('fDate').value;
+  const loc=document.getElementById('fLoc').value.trim();
+  if(!name) return showToast('⚠️ 種名を入力してください');
+  if(!cat) return showToast('⚠️ カテゴリを選択してください');
+  if(!date) return showToast('⚠️ 観察日を入力してください');
+  if(!loc) return showToast('⚠️ 調査地点を入力してください');
+
+  const btn=document.getElementById('btnSave');
+  btn.disabled=true;btn.textContent='保存中...';
+  setSyncing(true);
+
+  try{
+    const {db,collection,addDoc,serverTimestamp}=fb;
+    await addDoc(collection(db,'records'),{
+      category:cat, name, scientific:document.getElementById('fSci').value.trim(),
+      date, time:document.getElementById('fTime').value,
+      location:loc, count:document.getElementById('fCount').value,
+      lat:document.getElementById('fLat').value, lng:document.getElementById('fLng').value,
+      weather:document.getElementById('fWeather').value, temp:document.getElementById('fTemp').value,
+      condition:document.getElementById('fCond').value,
+      behaviors:getTags(),
+      notes:document.getElementById('fNotes').value.trim(),
+      observer:document.getElementById('fObserver').value.trim(),
+      method:document.getElementById('fMethod').value,
+      photos: pendingPhotos.map(p=>p.dataUrl),
+      idChecks:[],
+      submittedBy: currentUser.uid,
+      submittedByName: currentUser.displayName||currentUser.email,
+      createdAt: serverTimestamp()
+    });
+    pendingPhotos=[];
+    resetForm();
+    showToast('✅ 記録を保存しました！');
+  }catch(e){
+    showToast('❌ 保存に失敗しました: '+e.message);
+    setSyncing(false,'error');
+  } finally{
+    btn.disabled=false;btn.innerHTML='🌿 記録を保存する';
+  }
+}
+
+function resetForm(){
+  ['fName','fSci','fDate','fTime','fLoc','fCount','fLat','fLng','fTemp','fNotes','fObserver','fCat','fWeather','fCond','fGpsUrl'].forEach(id=>{
+    const el=document.getElementById(id);if(el)el.value='';});
+  document.getElementById('fMethod').selectedIndex=0;
+  document.querySelectorAll('.cat-btn,.opt-btn').forEach(b=>b.classList.remove('sel'));
+  document.getElementById('thumbList').innerHTML='';
+  document.getElementById('coordsRow').style.display='none';
+  document.getElementById('condDesc').style.display='none';
+  document.getElementById('fDate').value=new Date().toISOString().slice(0,10);
+}
+
+// ===========================
+// COPY ENV BANNER
+// ===========================
+function updateCopyBanner(){
+  if(!records.length){document.getElementById('copyBanner').classList.remove('visible');return;}
+  const last=records[0];
+  document.getElementById('copyPrev').textContent=`直前: ${last.name} / ${last.date} / ${last.location}`;
+  document.getElementById('copyBanner').classList.add('visible');
+}
+function applyCopy(){
+  if(!records.length) return;
+  const last=records[0];
+  const chk=f=>document.querySelector(`.copy-chk[data-f="${f}"] input`)?.checked;
+  if(chk('date')) document.getElementById('fDate').value=last.date||'';
+  if(chk('time')) document.getElementById('fTime').value=last.time||'';
+  if(chk('location')) document.getElementById('fLoc').value=last.location||'';
+  if(chk('coords')&&last.lat&&last.lng) setCoords(parseFloat(last.lat),parseFloat(last.lng));
+  if(chk('weather')&&last.weather){
+    document.querySelectorAll('#weatherRow .opt-btn').forEach(b=>{b.classList.toggle('sel',b.dataset.val===last.weather);});
+    document.getElementById('fWeather').value=last.weather;
+  }
+  if(chk('temp')) document.getElementById('fTemp').value=last.temp||'';
+  if(chk('observer')) document.getElementById('fObserver').value=last.observer||'';
+  if(chk('method')){
+    const sel=document.getElementById('fMethod');
+    for(let i=0;i<sel.options.length;i++){if(sel.options[i].value===last.method){sel.selectedIndex=i;break;}}
+  }
+  showToast('📋 環境情報をコピーしました');
+}
+
+// ===========================
+// DATABASE RENDER
+// ===========================
+function getIdStatus(r){
+  if(!r.idChecks||!r.idChecks.length) return 'none';
+  return r.idChecks[r.idChecks.length-1].status;
+}
+function renderDb(){
+  const q=(document.getElementById('srch')?.value||'').toLowerCase();
+  const cat=document.getElementById('fltrCat')?.value||'';
+  const idF=document.getElementById('fltrId')?.value||'';
+
+  let data=records.filter(r=>{
+    if(cat&&r.category!==cat) return false;
+    if(idF&&getIdStatus(r)!==idF) return false;
+    if(q&&![r.name,r.scientific,r.location,r.notes].join(' ').toLowerCase().includes(q)) return false;
+    // members only see their own records
+    if(userRole!=='admin'&&r.submittedBy!==currentUser.uid) return false;
+    return true;
+  });
+
+  // Desktop table
+  const tbody=document.getElementById('tblBody');
+  if(!data.length){
+    tbody.innerHTML='<tr><td colspan="7"><div class="empty-state"><div class="empty-ic">🌿</div><p>記録がありません</p></div></td></tr>';
+  } else {
+    tbody.innerHTML=data.map(r=>{
+      const st=getIdStatus(r);const il=ID_LABELS[st]||ID_LABELS.none;
+      const canEdit=userRole==='admin'||r.submittedBy===currentUser.uid;
+      return `<tr>
+        <td>${CAT_ICONS[r.category]||'🔬'} <span style="font-size:11px">${r.category}</span></td>
+        <td><div class="sp-name">${r.name}</div>${r.scientific?`<div class="sp-sci">${r.scientific}</div>`:''}</td>
+        <td style="font-family:'Space Mono',monospace;font-size:11px">${r.date}${r.time?' '+r.time:''}</td>
+        <td style="font-size:11px;color:var(--stone)">${r.lat&&r.lng?`<a href="https://www.google.com/maps?q=${r.lat},${r.lng}" target="_blank" style="color:var(--sky);text-decoration:none">📍</a> `:''
+        }${r.location}</td>
+        <td>${r.count?`<span class="count-badge">${r.count}</span>`:'-'}</td>
+        <td><span class="id-badge ${il.c}">${il.i} ${il.t}</span></td>
+        <td>
+          <button class="act-btn" onclick="showDetail('${r.id}')">🔍</button>
+          ${canEdit?`<button class="act-btn" onclick="openIdMo('${r.id}')">🏷</button>`:''}
+          ${canEdit?`<button class="act-btn" onclick="moveTrash('${r.id}')">🗑</button>`:''}
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  // Mobile cards
+  const cards=document.getElementById('recCards');
+  if(!data.length){
+    cards.innerHTML='<div class="empty-state"><div class="empty-ic">🌿</div><p>記録がありません</p></div>';
+  } else {
+    cards.innerHTML=data.map(r=>{
+      const st=getIdStatus(r);const il=ID_LABELS[st]||ID_LABELS.none;
+      const canEdit=userRole==='admin'||r.submittedBy===currentUser.uid;
+      return `<div class="rec-card">
+        <div class="rec-card-top">
+          <div>
+            <div class="rec-card-name">${CAT_ICONS[r.category]||'🔬'} ${r.name}</div>
+            ${r.scientific?`<div class="rec-card-sci">${r.scientific}</div>`:''}
+          </div>
+          <span class="id-badge ${il.c}">${il.i} ${il.t}</span>
+        </div>
+        <div class="rec-card-meta">${r.date} · ${r.location}</div>
+        ${r.count?`<div style="font-size:11px;color:var(--fern)">個体数: ${r.count}</div>`:''}
+        <div class="rec-card-actions">
+          <button class="btn-sec" style="padding:6px 12px;font-size:11px" onclick="showDetail('${r.id}')">🔍 詳細</button>
+          ${canEdit?`<button class="btn-sec" style="padding:6px 12px;font-size:11px" onclick="openIdMo('${r.id}')">🏷 同定</button>`:''}
+          ${canEdit?`<button class="btn-sec" style="padding:6px 12px;font-size:11px;color:var(--error)" onclick="moveTrash('${r.id}')">🗑</button>`:''}
+        </div>
+      </div>`;
+    }).join('');
+  }
+}
+
+// ===========================
+// DETAIL MODAL
+// ===========================
+function showDetail(id){
+  const r=records.find(x=>x.id===id);if(!r) return;
+  const st=getIdStatus(r);const il=ID_LABELS[st]||ID_LABELS.none;
+  document.getElementById('moTitle').textContent=`${CAT_ICONS[r.category]||'🔬'} ${r.name}`;
+  document.getElementById('moSub').innerHTML=r.scientific?`<i>${r.scientific}</i> · ${r.category}`:r.category;
+
+  const mapHtml=r.lat&&r.lng?`<a href="https://www.google.com/maps?q=${r.lat},${r.lng}" target="_blank" style="color:var(--sky);font-size:11px;text-decoration:none">🗺 Googleマップで開く（${parseFloat(r.lat).toFixed(4)}, ${parseFloat(r.lng).toFixed(4)}）</a>`:'';
+  const photosHtml=r.photos&&r.photos.length?`<div class="det-item full"><label>写真（${r.photos.length}枚）</label><div class="photo-grid">${r.photos.map(p=>`<img src="${p}" onclick="openLb('${p}')" alt="">`).join('')}</div></div>`:'';
+  const idHtml=r.idChecks&&r.idChecks.length?r.idChecks.map(c=>{const ci=ID_LABELS[c.status]||ID_LABELS.none;return`<div class="id-entry ${c.status}"><div class="id-entry-top"><span class="id-badge ${ci.c}">${ci.i} ${ci.t}</span><span class="id-entry-meta">${c.checker}${c.date?' · '+c.date:''}</span></div>${c.comment?`<div style="margin-top:3px;font-size:12px">${c.comment}</div>`:''}</div>`;}).join(''):'<p style="font-size:12px;color:var(--stone)">まだ同定チェックはありません</p>';
+
+  document.getElementById('moBody').innerHTML=`
+    <div class="det-grid">
+      <div class="det-item"><label>カテゴリ</label><div class="val">${CAT_ICONS[r.category]||''} ${r.category}</div></div>
+      <div class="det-item"><label>観察日時</label><div class="val">${r.date}${r.time?' '+r.time:''}</div></div>
+      <div class="det-item full"><label>調査地点</label><div class="val">📍 ${r.location}</div>${mapHtml}</div>
+      ${r.count?`<div class="det-item"><label>個体数</label><div class="val">${r.count} 個体</div></div>`:''}
+      ${r.weather?`<div class="det-item"><label>天候</label><div class="val">${r.weather}</div></div>`:''}
+      ${r.temp?`<div class="det-item"><label>気温</label><div class="val">${r.temp}℃</div></div>`:''}
+      ${r.condition?`<div class="det-item"><label>コンディション</label><div class="val">${r.condition}</div></div>`:''}
+      ${r.method?`<div class="det-item"><label>記録方法</label><div class="val">${r.method}</div></div>`:''}
+      ${r.observer?`<div class="det-item"><label>観察者</label><div class="val">${r.observer}</div></div>`:''}
+      ${r.submittedByName?`<div class="det-item"><label>入力者</label><div class="val">${r.submittedByName}</div></div>`:''}
+      ${r.behaviors&&r.behaviors.length?`<div class="det-item full"><label>行動・状態</label><div class="val">${r.behaviors.join(' / ')}</div></div>`:''}
+      ${r.notes?`<div class="det-item full"><label>観察メモ</label><div class="notes-box">${r.notes}</div></div>`:''}
+      ${photosHtml}
+    </div>
+    <div class="sec-div">🔍 同定チェック履歴</div>
+    <div style="margin-bottom:10px">${idHtml}</div>
+    ${(userRole==='admin'||r.submittedBy===currentUser.uid)?`<button class="btn-sec" style="width:100%" onclick="closeMoDirect('detailMo');openIdMo('${r.id}')">🏷 同定チェックを追加</button>`:''}
+  `;
+  document.getElementById('detailMo').classList.add('open');
+}
+
+// ===========================
+// ID CHECK
+// ===========================
+function openIdMo(id){
+  currentIdRecId=id;
+  const r=records.find(x=>x.id===id);if(!r) return;
+  document.getElementById('idMoSub').textContent=`${r.name} · ${r.date} · ${r.location}`;
+  document.getElementById('idChecker').value=currentUser.displayName||'';
+  document.getElementById('idDate').value=new Date().toISOString().slice(0,10);
+  document.getElementById('idComment').value='';
+  document.getElementById('idStatus').value='';
+  document.querySelectorAll('.id-s-btn').forEach(b=>b.classList.remove('sel'));
+  const hist=document.getElementById('idHistory');
+  if(r.idChecks&&r.idChecks.length){
+    hist.innerHTML='<div class="sec-div">チェック履歴</div>'+[...r.idChecks].reverse().map(c=>{const ci=ID_LABELS[c.status]||ID_LABELS.none;return`<div class="id-entry ${c.status}"><div class="id-entry-top"><span class="id-badge ${ci.c}">${ci.i} ${ci.t}</span><span class="id-entry-meta">${c.checker}${c.date?' · '+c.date:''}</span></div>${c.comment?`<div style="margin-top:3px;font-size:12px">${c.comment}</div>`:''}</div>`;}).join('');
+  } else hist.innerHTML='';
+  document.getElementById('idMo').classList.add('open');
+}
+function selIdS(btn){document.querySelectorAll('.id-s-btn').forEach(b=>b.classList.remove('sel'));btn.classList.add('sel');document.getElementById('idStatus').value=btn.dataset.s;}
+async function saveIdCheck(){
+  const checker=document.getElementById('idChecker').value.trim();
+  const status=document.getElementById('idStatus').value;
+  if(!checker) return showToast('⚠️ チェック者名を入力してください');
+  if(!status) return showToast('⚠️ ステータスを選択してください');
+  const r=records.find(x=>x.id===currentIdRecId);if(!r) return;
+  const checks=[...(r.idChecks||[]),{checker,date:document.getElementById('idDate').value,status,comment:document.getElementById('idComment').value.trim(),timestamp:new Date().toISOString(),checkedBy:currentUser.uid}];
+  try{
+    await fb.updateDoc(fb.doc(fb.db,'records',currentIdRecId),{idChecks:checks});
+    closeMoDirect('idMo');showToast('✅ 同定チェックを保存しました');
+  }catch(e){showToast('❌ 保存失敗: '+e.message);}
+}
+function record_col(){return 'records';}
+
+// ===========================
+// TRASH
+// ===========================
+async function moveTrash(id){
+  const r=records.find(x=>x.id===id);if(!r) return;
+  if(!confirm(`「${r.name}」をゴミ箱に移動しますか？`)) return;
+  try{
+    const {db,doc,updateDoc,addDoc,collection,deleteDoc,serverTimestamp}=fb;
+    await addDoc(collection(db,'trash'),{...r,deletedAt:serverTimestamp(),deletedBy:currentUser.uid});
+    await deleteDoc(doc(db,'records',id));
+    showToast('🗑 ゴミ箱に移動しました');
+  }catch(e){showToast('❌ 失敗: '+e.message);}
+}
+async function restoreRec(id){
+  const r=trashRecs.find(x=>x.id===id);if(!r) return;
+  try{
+    const {db,doc,deleteDoc,addDoc,collection}=fb;
+    const {id:_,deletedAt,deletedBy,...data}=r;
+    await addDoc(collection(db,'records'),data);
+    await deleteDoc(doc(db,'trash',id));
+    showToast('♻️ 記録を復元しました');
+  }catch(e){showToast('❌ 失敗: '+e.message);}
+}
+async function permDelete(id){
+  if(!confirm('完全に削除しますか？取り消せません。')) return;
+  try{await fb.deleteDoc(fb.doc(fb.db,'trash',id));showToast('🗑 完全削除しました');}
+  catch(e){showToast('❌ 失敗: '+e.message);}
+}
+async function emptyTrash(){
+  if(!trashRecs.length) return;
+  if(!confirm(`ゴミ箱の${trashRecs.length}件を全て完全削除しますか？`)) return;
+  for(const r of trashRecs) await fb.deleteDoc(fb.doc(fb.db,'trash',r.id));
+  showToast('🗑 ゴミ箱を空にしました');
+}
+function renderTrash(){
+  const el=document.getElementById('trashList');
+  const info=document.getElementById('trashInfo');
+  if(!trashRecs.length){info.textContent='ゴミ箱は空です';el.innerHTML='<div class="empty-state"><div class="empty-ic">🗑</div><p>削除された記録はありません</p></div>';return;}
+  info.textContent=`${trashRecs.length} 件`;
+  el.innerHTML=trashRecs.map(r=>`
+    <div class="trash-item">
+      <div style="font-size:26px">${CAT_ICONS[r.category]||'🔬'}</div>
+      <div class="trash-info-block">
+        <div class="trash-name">${r.name}</div>
+        <div class="trash-meta">${r.date} · ${r.location}</div>
+        <div class="trash-del-date">削除: ${r.deletedAt?.toDate?r.deletedAt.toDate().toLocaleString('ja-JP'):''}</div>
+      </div>
+      <button class="btn-restore" onclick="restoreRec('${r.id}')">♻️ 復元</button>
+      <button class="btn-pdel" onclick="permDelete('${r.id}')">完全削除</button>
+    </div>`).join('');
+}
+
+// ===========================
+// ADMIN
+// ===========================
+function renderAdminUsers(users){
+  const tbody=document.getElementById('adminTbl');
+  if(!tbody) return;
+  tbody.innerHTML=users.map(u=>`
+    <tr>
+      <td><div style="display:flex;align-items:center;gap:8px">
+        ${u.photo?`<img src="${u.photo}" style="width:28px;height:28px;border-radius:50%">`:''}<span>${u.name||'—'}</span>
+      </div></td>
+      <td style="font-size:12px;color:var(--stone)">${u.email||'—'}</td>
+      <td style="font-size:11px;font-family:'Space Mono',monospace">${u.firstLogin?.toDate?u.firstLogin.toDate().toLocaleDateString('ja-JP'):''}</td>
+      <td>
+        <select class="role-sel" onchange="updateRole('${u.id}',this.value)">
+          <option value="member"${u.role==='member'?' selected':''}>メンバー</option>
+          <option value="admin"${u.role==='admin'?' selected':''}>管理者</option>
+        </select>
+      </td>
+    </tr>`).join('');
+}
+async function updateRole(uid,role){
+  try{
+    await fb.updateDoc(fb.doc(fb.db,'users',uid),{role});
+    showToast(`✅ 権限を「${role==='admin'?'管理者':'メンバー'}」に変更しました`);
+  }catch(e){showToast('❌ 失敗: '+e.message);}
+}
+
+// ===========================
+// CSV EXPORT
+// ===========================
+function exportCSV(){
+  if(!records.length) return showToast('⚠️ データがありません');
+  const hdrs=['ID','カテゴリ','種名','学名','観察日','時刻','地点','緯度','経度','個体数','天候','気温','コンディション','行動','観察メモ','観察者','記録方法','同定ステータス','入力者'];
+  const rows=records.map(r=>[r.id,r.category,r.name,r.scientific,r.date,r.time,r.location,r.lat,r.lng,r.count,r.weather,r.temp,r.condition,(r.behaviors||[]).join('|'),r.notes,r.observer,r.method,getIdStatus(r),r.submittedByName].map(v=>`"${(v||'').toString().replace(/"/g,'""')}"`));
+  const csv='\uFEFF'+[hdrs,...rows].map(r=>r.join(',')).join('\n');
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+  a.download=`bio-obs_${new Date().toISOString().slice(0,10)}.csv`;a.click();
+  showToast('✅ CSV出力しました');
+}
+
+// ===========================
+// DOCX (admin only)
+// ===========================
+async function genDocx(){
+  if(userRole!=='admin') return showToast('⚠️ レポート出力は管理者のみ');
+  const btn=document.getElementById('btnGen');
+  btn.disabled=true;btn.innerHTML='<div style="width:16px;height:16px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;display:inline-block;vertical-align:middle;margin-right:8px"></div>生成中...';
+  try{
+    const {Document,Packer,Paragraph,TextRun,Table,TableRow,TableCell,HeadingLevel,AlignmentType,WidthType,BorderStyle,ShadingType,PageBreak}=docx;
+    const title=document.getElementById('rpTitle').value||'生物相調査報告書';
+    const author=document.getElementById('rpAuthor').value;
+    const org=document.getElementById('rpOrg').value;
+    const from=document.getElementById('rpFrom').value;
+    const to=document.getElementById('rpTo').value;
+    const cat=document.getElementById('rpCat').value;
+    const idF=document.getElementById('rpIdF').value;
+    const abstract=document.getElementById('rpAbs').value;
+    const today=new Date().toLocaleDateString('ja-JP',{year:'numeric',month:'long',day:'numeric'});
+
+    let data=records.filter(r=>{
+      if(cat&&r.category!==cat) return false;
+      if(from&&r.date<from) return false;
+      if(to&&r.date>to) return false;
+      if(idF==='ok'&&getIdStatus(r)!=='ok') return false;
+      if(idF==='checked'){const s=getIdStatus(r);if(s!=='ok'&&s!=='warn') return false;}
+      return true;
+    });
+
+    const cb={style:BorderStyle.SINGLE,size:1,color:'CCCCCC'};
+    const borders={top:cb,bottom:cb,left:cb,right:cb};
+    const cm={top:80,bottom:80,left:120,right:120};
+    const cell=(text,opts={})=>new TableCell({borders,margins:cm,width:opts.w?{size:opts.w,type:WidthType.DXA}:undefined,shading:opts.shade?{fill:opts.shade,type:ShadingType.CLEAR}:undefined,children:[new Paragraph({alignment:opts.align||AlignmentType.LEFT,children:[new TextRun({text:text||'',bold:opts.bold||false,size:opts.size||20,color:opts.color||'1A1A14',font:'Meiryo'})]})]});
+    const hp=(text,lv,before=240,after=120)=>new Paragraph({heading:lv===1?HeadingLevel.HEADING_1:lv===2?HeadingLevel.HEADING_2:HeadingLevel.HEADING_3,spacing:{before,after},children:[new TextRun({text,bold:true,size:{1:36,2:28,3:24}[lv]||24,color:{1:'2D4A1E',2:'4A7C35',3:'4A7C35'}[lv]||'1A1A14',font:'Meiryo'})]});
+    const pp=(text,opts={})=>new Paragraph({spacing:{before:opts.before||60,after:opts.after||60},alignment:opts.align||AlignmentType.LEFT,children:[new TextRun({text:text||'',bold:opts.bold||false,size:opts.size||20,color:opts.color||'1A1A14',font:'Meiryo'})]});
+
+    const ch=[];let sn=0;
+    // Title
+    ch.push(new Paragraph({spacing:{before:2880}}));
+    ch.push(pp(title,{size:48,bold:true,color:'2D4A1E',align:AlignmentType.CENTER}));
+    ch.push(new Paragraph({spacing:{before:480}}));
+    ch.push(pp('━'.repeat(28),{align:AlignmentType.CENTER,color:'C8DEB8'}));
+    ch.push(new Paragraph({spacing:{before:480}}));
+    if(author) ch.push(pp(`調査者：${author}`,{size:22,align:AlignmentType.CENTER}));
+    if(org) ch.push(pp(org,{size:20,color:'8A8070',align:AlignmentType.CENTER}));
+    if(from||to) ch.push(pp(`調査期間：${[from,to].filter(Boolean).join(' ～ ')}`,{size:20,align:AlignmentType.CENTER}));
+    ch.push(pp(`作成日：${today}`,{size:20,color:'8A8070',align:AlignmentType.CENTER}));
+    ch.push(new Paragraph({children:[new PageBreak()]}));
+
+    const inclSum=document.getElementById('ck-sum').classList.contains('checked');
+    const inclList=document.getElementById('ck-list').classList.contains('checked');
+    const inclDet=document.getElementById('ck-det').classList.contains('checked');
+    const inclStats=document.getElementById('ck-stats').classList.contains('checked');
+    const inclLoc=document.getElementById('ck-loc').classList.contains('checked');
+    const species=[...new Set(data.map(r=>r.name))];
+    const locs=[...new Set(data.map(r=>r.location).filter(Boolean))];
+
+    if(inclSum){
+      sn++;ch.push(hp(`第${sn}章　調査概要`,1));
+      const catC={};data.forEach(r=>{catC[r.category]=(catC[r.category]||0)+1;});
+      if(abstract){ch.push(hp('調査目的',2));ch.push(pp(abstract));}
+      ch.push(hp('サマリー',2));
+      ch.push(pp(`本調査では ${data.length} 件の記録が収集され、${species.length} 種が確認された。調査地点は ${locs.length} ヵ所。`));
+      ch.push(new Table({width:{size:9360,type:WidthType.DXA},columnWidths:[4680,4680],rows:[
+        new TableRow({children:[cell('項目',{w:4680,bold:true,shade:'D5E8F0'}),cell('数値',{w:4680,bold:true,shade:'D5E8F0'})]}),
+        new TableRow({children:[cell('総記録数',{w:4680}),cell(`${data.length} 件`,{w:4680})]}),
+        new TableRow({children:[cell('確認種数',{w:4680}),cell(`${species.length} 種`,{w:4680})]}),
+        new TableRow({children:[cell('調査地点数',{w:4680}),cell(`${locs.length} ヵ所`,{w:4680})]}),
+        new TableRow({children:[cell('承認済',{w:4680}),cell(`${data.filter(r=>getIdStatus(r)==='ok').length} 件`,{w:4680})]}),
+        ...Object.entries(catC).map(([k,v])=>new TableRow({children:[cell(`${CAT_ICONS[k]||''} ${k}`,{w:4680}),cell(`${v} 件`,{w:4680})]}))
+      ]}));
+    }
+    if(inclList){
+      sn++;ch.push(new Paragraph({children:[new PageBreak()]}));ch.push(hp(`第${sn}章　確認種リスト`,1));
+      const byCat={};data.forEach(r=>{if(!byCat[r.category])byCat[r.category]=[];if(!byCat[r.category].find(x=>x.name===r.name))byCat[r.category].push({name:r.name,sci:r.scientific,cnt:data.filter(x=>x.name===r.name).length,st:getIdStatus(r)});});
+      for(const[cn,items] of Object.entries(byCat)){
+        ch.push(hp(`${CAT_ICONS[cn]||'🔬'} ${cn}`,2));
+        ch.push(new Table({width:{size:9360,type:WidthType.DXA},columnWidths:[300,3000,2800,1100,1200,960],rows:[
+          new TableRow({children:[cell('No.',{w:300,bold:true,shade:'D5E8F0'}),cell('種名',{w:3000,bold:true,shade:'D5E8F0'}),cell('学名',{w:2800,bold:true,shade:'D5E8F0'}),cell('記録数',{w:1100,bold:true,shade:'D5E8F0'}),cell('同定',{w:1200,bold:true,shade:'D5E8F0'}),cell('最終確認',{w:960,bold:true,shade:'D5E8F0'})]}),
+          ...items.map((item,i)=>{const il=ID_LABELS[item.st]||ID_LABELS.none;const last=data.filter(r=>r.name===item.name).map(r=>r.date).sort().pop()||'';return new TableRow({children:[cell(String(i+1),{w:300}),cell(item.name,{w:3000,bold:true}),cell(item.sci||'',{w:2800}),cell(String(item.cnt),{w:1100}),cell(`${il.i} ${il.t}`,{w:1200}),cell(last,{w:960})]});})
+        ]}));
+      }
+    }
+    if(inclDet){
+      sn++;ch.push(new Paragraph({children:[new PageBreak()]}));ch.push(hp(`第${sn}章　個別観察記録`,1));
+      [...data].sort((a,b)=>b.date.localeCompare(a.date)).forEach((r,i)=>{
+        const il=ID_LABELS[getIdStatus(r)]||ID_LABELS.none;
+        ch.push(hp(`記録 ${i+1}：${r.name}（${r.date}）`,2,280,60));
+        const rows=[['種名',r.name],r.scientific?['学名',r.scientific]:null,['カテゴリ',r.category],['観察日時',r.date+(r.time?' '+r.time:'')],['調査地点',r.location],r.lat&&r.lng?['GPS',`${parseFloat(r.lat).toFixed(6)}, ${parseFloat(r.lng).toFixed(6)}`]:null,r.count?['個体数',r.count+' 個体']:null,r.weather?['天候',r.weather]:null,r.temp?['気温',r.temp+'℃']:null,r.condition?['コンディション',r.condition]:null,r.behaviors?.length?['行動・状態',r.behaviors.join('、')]:null,r.method?['記録方法',r.method]:null,r.observer?['観察者',r.observer]:null,['同定',`${il.i} ${il.t}`]].filter(Boolean);
+        ch.push(new Table({width:{size:9360,type:WidthType.DXA},columnWidths:[2340,7020],rows:rows.map(([k,v])=>new TableRow({children:[cell(k,{w:2340,bold:true,shade:'F0F5EC'}),cell(v,{w:7020})]}))}));
+        if(r.idChecks&&r.idChecks.length){ch.push(pp('【同定チェック履歴】',{bold:true,before:100,after:30}));r.idChecks.forEach(c=>{const ci=ID_LABELS[c.status]||ID_LABELS.none;ch.push(pp(`${ci.i} ${ci.t} / ${c.checker}${c.date?' ('+c.date+')':''}${c.comment?' — '+c.comment:''}`,{before:0,after:30,size:18,color:'4a4a3a'}));});}
+        if(r.notes){ch.push(pp('【観察メモ】',{bold:true,before:80,after:20}));ch.push(pp(r.notes,{before:0}));}
+        ch.push(new Paragraph({spacing:{before:120}}));
+      });
+    }
+    if(inclStats){
+      sn++;ch.push(new Paragraph({children:[new PageBreak()]}));ch.push(hp(`第${sn}章　カテゴリ別集計`,1));
+      const cd={};data.forEach(r=>{if(!cd[r.category])cd[r.category]={cnt:0,sp:new Set(),ok:0};cd[r.category].cnt++;cd[r.category].sp.add(r.name);if(getIdStatus(r)==='ok')cd[r.category].ok++;});
+      ch.push(new Table({width:{size:9360,type:WidthType.DXA},columnWidths:[2400,2400,2400,2160],rows:[new TableRow({children:[cell('カテゴリ',{w:2400,bold:true,shade:'D5E8F0'}),cell('記録数',{w:2400,bold:true,shade:'D5E8F0'}),cell('確認種数',{w:2400,bold:true,shade:'D5E8F0'}),cell('承認済',{w:2160,bold:true,shade:'D5E8F0'})]}),
+        ...Object.entries(cd).map(([cn,d])=>new TableRow({children:[cell(`${CAT_ICONS[cn]||''} ${cn}`,{w:2400}),cell(String(d.cnt),{w:2400}),cell(String(d.sp.size),{w:2400}),cell(String(d.ok),{w:2160})]}))
+      ]}));
+    }
+    if(inclLoc){
+      sn++;ch.push(new Paragraph({children:[new PageBreak()]}));ch.push(hp(`第${sn}章　地点別集計`,1));
+      const ld={};data.forEach(r=>{if(!ld[r.location])ld[r.location]={cnt:0,sp:new Set(),lat:r.lat,lng:r.lng};ld[r.location].cnt++;ld[r.location].sp.add(r.name);});
+      ch.push(new Table({width:{size:9360,type:WidthType.DXA},columnWidths:[4100,1600,1600,2060],rows:[new TableRow({children:[cell('地点',{w:4100,bold:true,shade:'D5E8F0'}),cell('記録数',{w:1600,bold:true,shade:'D5E8F0'}),cell('種数',{w:1600,bold:true,shade:'D5E8F0'}),cell('GPS',{w:2060,bold:true,shade:'D5E8F0'})]}),
+        ...Object.entries(ld).sort((a,b)=>b[1].cnt-a[1].cnt).map(([loc,d])=>new TableRow({children:[cell(loc,{w:4100}),cell(String(d.cnt),{w:1600}),cell(String(d.sp.size),{w:1600}),cell(d.lat&&d.lng?`${parseFloat(d.lat).toFixed(4)}, ${parseFloat(d.lng).toFixed(4)}`:''  ,{w:2060,size:16})]}))
+      ]}));
+    }
+    ch.push(new Paragraph({children:[new PageBreak()]}));
+    ch.push(pp('── 以上 ──',{align:AlignmentType.CENTER,color:'8A8070'}));
+    ch.push(pp(`生成日時：${new Date().toLocaleString('ja-JP')}`,{color:'8A8070',size:16,align:AlignmentType.CENTER,before:200}));
+
+    const document2=new Document({
+      styles:{default:{document:{run:{font:'Meiryo',size:20}}},paragraphStyles:[
+        {id:'Heading1',name:'Heading 1',basedOn:'Normal',next:'Normal',quickFormat:true,run:{size:36,bold:true,font:'Meiryo',color:'2D4A1E'},paragraph:{spacing:{before:480,after:240},outlineLevel:0,border:{bottom:{style:BorderStyle.SINGLE,size:3,color:'4A7C35',space:4}}}},
+        {id:'Heading2',name:'Heading 2',basedOn:'Normal',next:'Normal',quickFormat:true,run:{size:28,bold:true,font:'Meiryo',color:'4A7C35'},paragraph:{spacing:{before:360,after:100},outlineLevel:1}},
+        {id:'Heading3',name:'Heading 3',basedOn:'Normal',next:'Normal',quickFormat:true,run:{size:24,bold:true,font:'Meiryo',color:'4A7C35'},paragraph:{spacing:{before:240,after:60},outlineLevel:2}},
+      ]},
+      sections:[{properties:{page:{size:{width:11906,height:16838},margin:{top:1440,right:1440,bottom:1440,left:1700}}},children:ch}]
+    });
+    const buffer=await Packer.toBuffer(document2);
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(new Blob([buffer],{type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'}));
+    a.download=`${title}_${new Date().toISOString().slice(0,10)}.docx`;a.click();
+    showToast('✅ Word文書を生成しました');
+  }catch(e){console.error(e);showToast('❌ 生成エラー: '+e.message);}
+  finally{btn.disabled=false;btn.innerHTML='📄 Word文書を生成・ダウンロード';}
+}
+
+// ===========================
+// NAVIGATION
+// ===========================
+function showPage(id){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById('page-'+id).classList.add('active');
+  const pages=['input','database','report','trash','admin'];
+  document.querySelectorAll('.nav-tab')[pages.indexOf(id)]?.classList.add('active');
+  if(id==='database') renderDb();
+}
+
+// ===========================
+// MODAL
+// ===========================
+function closeMo(e,id){if(e.target.classList.contains('modal-overlay'))closeMoDirect(id);}
+function closeMoDirect(id){document.getElementById(id).classList.remove('open');}
+function openLb(src){document.getElementById('lbImg').src=src;document.getElementById('lightbox').classList.add('open');}
+
+// ===========================
+// TOAST
+// ===========================
+let toastTm;
+function showToast(msg){
+  clearTimeout(toastTm);const t=document.getElementById('toast');
+  t.textContent=msg;t.classList.add('show');
+  toastTm=setTimeout(()=>t.classList.remove('show'),3200);
+}
+function togCk(el){el.classList.toggle('checked');el.querySelector('input').checked=!el.querySelector('input').checked;}
+</script>
+</body>
+</html>
