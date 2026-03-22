@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🔬 研究・解析 — 生物観察データベース</title>
+
+<!-- Firebase compat SDK -->
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+<!-- Leaflet.js -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<style>
+:root {
+  --gd: #1B5E20; --gm: #2E7D32; --gl: #4CAF50;
+  --gp: #E8F5E9; --ga: #81C784; --border: #C8E6C9;
+  --amber: #FF8F00; --text: #212121; --sub: #616161;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Hiragino Kaku Gothic ProN','Noto Sans JP',sans-serif; background:#F1F8E9; color:var(--text); min-height:100vh; }
+
+/* LOGIN */
+#loginScreen { display:flex; align-items:center; justify-content:center; min-height:100vh; background:var(--gd); }
+.login-card { background:white; border-radius:16px; padding:48px 40px; text-align:center; max-width:400px; width:90%; box-shadow:0 8px 32px rgba(0,0,0,.2); }
+.login-card h1 { font-size:1.4em; color:var(--gd); margin-bottom:8px; }
+.login-card p { color:var(--sub); font-size:.9em; margin-bottom:32px; }
+.btn-google { background:white; border:2px solid var(--gl); color:var(--gd); padding:12px 24px; border-radius:8px; font-size:1em; cursor:pointer; width:100%; font-weight:bold; }
+.btn-google:hover { background:var(--gp); }
+
+/* HEADER */
+header { background:var(--gd); color:white; padding:12px 20px; display:flex; align-items:center; gap:16px; position:sticky; top:0; z-index:200; }
+.header-title { font-size:1.1em; font-weight:bold; flex:1; }
+.header-badge { font-size:.75em; background:var(--gm); padding:3px 10px; border-radius:12px; }
+.btn-back { background:none; border:1px solid rgba(255,255,255,.4); color:white; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:.85em; text-decoration:none; }
+
+/* TABS */
+.tab-nav { background:var(--gm); display:flex; overflow-x:auto; padding:0 16px; gap:2px; }
+.tab-btn { background:none; border:none; color:rgba(255,255,255,.7); padding:12px 20px; cursor:pointer; font-size:.9em; white-space:nowrap; border-bottom:3px solid transparent; transition:all .2s; }
+.tab-btn.active { color:white; border-bottom-color:#A5D6A7; background:rgba(255,255,255,.08); }
+.tab-btn:hover { color:white; }
+
+/* LAYOUT */
+main { padding:20px; max-width:1200px; margin:0 auto; }
+.tab-section { display:none; }
+.tab-section.active { display:block; }
+
+/* CARDS */
+.card { background:white; border-radius:12px; padding:20px; margin-bottom:16px; box-shadow:0 2px 8px rgba(0,0,0,.06); border:1px solid var(--border); }
+.card-title { font-size:1.05em; font-weight:bold; color:var(--gd); margin-bottom:14px; }
+
+/* FILTERS */
+.filter-row { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px; align-items:flex-end; }
+.fg { display:flex; flex-direction:column; gap:4px; }
+.fg label { font-size:.78em; color:var(--sub); font-weight:600; }
+.fg select, .fg input { padding:7px 10px; border:1px solid var(--border); border-radius:6px; font-size:.9em; background:white; min-width:120px; }
+.btn-run { background:var(--gl); color:white; border:none; padding:9px 22px; border-radius:6px; cursor:pointer; font-weight:bold; font-size:.9em; }
+.btn-run:hover { background:var(--gm); }
+
+/* STATS GRID */
+.stats-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; margin-bottom:16px; }
+.stat-card { background:var(--gp); border-radius:8px; padding:14px; text-align:center; border:1px solid var(--border); }
+.stat-label { font-size:.75em; color:var(--sub); margin-bottom:5px; }
+.stat-value { font-size:1.7em; font-weight:bold; color:var(--gd); }
+.stat-sub { font-size:.72em; color:var(--sub); margin-top:2px; }
+
+/* CHARTS */
+.chart-wrap { position:relative; height:320px; width:100%; }
+
+/* MAP */
+#foodMap { height:440px; border-radius:8px; overflow:hidden; }
+
+/* TABLES */
+.dtable { width:100%; border-collapse:collapse; font-size:.85em; }
+.dtable th { background:var(--gd); color:white; padding:8px 10px; text-align:left; }
+.dtable td { padding:7px 10px; border-bottom:1px solid var(--border); vertical-align:top; }
+.dtable tr:hover td { background:var(--gp); }
+
+/* PHENO TABLE */
+.ptable-wrap { overflow-x:auto; }
+.ptable { width:100%; border-collapse:collapse; font-size:.82em; min-width:700px; }
+.ptable th { background:var(--gd); color:white; padding:7px 8px; text-align:center; }
+.ptable th:first-child { text-align:left; min-width:120px; }
+.ptable td { padding:6px 8px; border-bottom:1px solid var(--border); text-align:center; }
+.ptable td:first-child { text-align:left; font-weight:500; }
+.ptable tr:hover td { background:var(--gp); }
+.hcell { display:inline-block; width:28px; height:20px; border-radius:3px; font-size:.7em; color:white; line-height:20px; text-align:center; }
+
+/* FOOD SCORE */
+.food-list { list-style:none; }
+.food-item { display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid var(--border); }
+.food-name { flex:1; font-size:.88em; }
+.food-score span { cursor:pointer; font-size:1.1em; color:#ccc; }
+.food-score span.on { color:var(--amber); }
+.rm-btn { background:none; border:none; color:#ccc; cursor:pointer; font-size:.85em; }
+.rm-btn:hover { color:#E53935; }
+
+/* LEGEND */
+.legend { display:flex; gap:14px; flex-wrap:wrap; font-size:.8em; color:var(--sub); margin-top:10px; }
+.ldot { width:11px; height:11px; border-radius:50%; display:inline-block; margin-right:4px; }
+
+/* INSIGHT */
+.insight { background:#E8F5E9; border-left:4px solid var(--gl); padding:11px 14px; border-radius:0 8px 8px 0; font-size:.87em; line-height:1.7; margin-top:12px; }
+
+/* LOADING / EMPTY */
+.empty { text-align:center; padding:32px; color:var(--sub); font-size:.88em; }
+.loading { text-align:center; padding:32px; color:var(--sub); }
+.spinner { width:28px; height:28px; border:3px solid var(--border); border-top-color:var(--gl); border-radius:50%; animation:spin .8s linear infinite; margin:0 auto 10px; }
+@keyframes spin { to{transform:rotate(360deg);} }
+
+/* CONFIG SETUP SCREEN */
+
+/* 2-col layout */
+.two-col { display:grid; grid-template-columns:1fr 300px; gap:16px; }
+@media(max-width:800px){ .two-col { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+
+<!-- ========== LOGIN ========== -->
+<div id="loginScreen">
+  <div class="login-card">
+    <h1>🔬 研究・解析モジュール</h1>
+    <p>生物観察データベースの研究・解析ツールです。<br>同じGoogleアカウントでログインしてください。</p>
+    <button class="btn-google" id="loginBtn" onclick="signIn()">🔑 Googleアカウントでログイン</button>
+    <div id="sdkError" style="display:none;margin-top:16px;background:#FFF3E0;border:1.5px solid #FFA726;color:#BF360C;border-radius:8px;padding:12px 14px;font-size:.83em;line-height:1.8;text-align:left">
+      ⚠️ Firebase に接続できませんでした。<br>
+      このページは <strong>GitHub Pages（https://）</strong> 上で開く必要があります。<br>
+      ローカルのファイルとして開いた場合は動作しません。<br><br>
+      <strong>対処方法：</strong><br>
+      このファイルを <code>okillcalco-bot.github.io/bio-observer/</code> にアップロードして、そのURLで開いてください。
+    </div>
+  </div>
+</div>
+
+<!-- ========== MAIN ========== -->
+<div id="mainApp" style="display:none">
+
+  <header>
+    <a href="bio-observer-firebase.html" class="btn-back">← 記録画面へ</a>
+    <span class="header-title">🔬 研究・解析</span>
+    <span class="header-badge" id="badge">読込中...</span>
+  </header>
+
+  <div class="tab-nav">
+    <button class="tab-btn active" onclick="switchTab('pheno',this)">🌸 フェノロジー</button>
+    <button class="tab-btn" onclick="switchTab('food',this)">🗺 食物資源マップ</button>
+    <button class="tab-btn" onclick="switchTab('div',this)">📊 多様度指数</button>
+    <button class="tab-btn" onclick="switchTab('trend',this)">📈 個体数トレンド</button>
+  </div>
+
+  <main>
+
+    <!-- ============================= TAB 1: PHENOLOGY ============================= -->
+    <div id="tab-pheno" class="tab-section active">
+      <div class="card">
+        <div class="card-title">🌸 フェノロジー解析 ― 季節変化の追跡</div>
+        <p style="font-size:.85em;color:var(--sub);margin-bottom:14px">
+          植物・動物の「開花・結実・採餌・繁殖」などを月別に集計し、年次変化を可視化します。<br>
+          調査を重ねることで気候変動や環境変化の指標として活用できます。
+        </p>
+        <div class="filter-row">
+          <div class="fg"><label>カテゴリ</label>
+            <select id="pCat"><option value="">すべて</option><option value="植物" selected>植物</option><option value="昆虫・節足動物">昆虫・節足</option><option value="鳥類">鳥類</option><option value="哺乳類">哺乳類</option></select>
+          </div>
+          <div class="fg"><label>年</label><select id="pYear"></select></div>
+          <div class="fg"><label>種名（空白=全種）</label><input type="text" id="pSp" placeholder="例: コナラ"></div>
+          <div class="fg"><label>行動タグ</label>
+            <select id="pBeh"><option value="all">主要タグすべて</option><option value="開花">開花</option><option value="結実">結実</option><option value="採餌">採餌</option><option value="繁殖行動">繁殖行動</option><option value="鳴き声">鳴き声</option></select>
+          </div>
+          <button class="btn-run" onclick="runPheno()">🔄 解析</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">月別 行動タグ 出現回数（折れ線グラフ）</div>
+        <div class="chart-wrap"><canvas id="phenoChart"></canvas></div>
+        <div class="legend" id="phenoLegend"></div>
+        <div class="insight" id="phenoInsight" style="display:none"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">種別 フェノロジーカレンダー <span style="font-size:.8em;color:var(--sub);font-weight:normal">（色: 🩷開花 🔴結実 🟢採餌 🔵その他）</span></div>
+        <div class="ptable-wrap">
+          <table class="ptable" id="phenoTable">
+            <thead><tr><th>種名</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th></tr></thead>
+            <tbody id="phenoTbody"><tr><td colspan="13" class="empty">解析ボタンを押してください</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================= TAB 2: FOOD MAP ============================= -->
+    <div id="tab-food" class="tab-section">
+      <div class="card">
+        <div class="card-title">🗺 食物資源マップ ― イノシシの餌環境可視化</div>
+        <p style="font-size:.85em;color:var(--sub);margin-bottom:14px">
+          観察記録とフィールド専門知識に基づく「食物スコア」を地図上にプロットします。<br>
+          捕獲日・季節との照合で Gibier Brand Connect のテロワール情報として活用できます。
+        </p>
+        <div class="filter-row">
+          <div class="fg"><label>季節</label>
+            <select id="fSeason"><option value="">通年</option><option value="spring">春（3〜5月）</option><option value="summer">夏（6〜8月）</option><option value="autumn">秋（9〜11月）</option><option value="winter">冬（12〜2月）</option></select>
+          </div>
+          <div class="fg"><label>最小スコア</label>
+            <select id="fMin"><option value="1">1以上（全表示）</option><option value="3" selected>3以上</option><option value="4">4以上</option><option value="5">5のみ</option></select>
+          </div>
+          <button class="btn-run" onclick="runFoodMap()">🔄 更新</button>
+        </div>
+      </div>
+
+      <div class="two-col">
+        <div class="card" style="padding:0;overflow:hidden">
+          <div id="foodMap"></div>
+          <div class="legend" style="padding:12px">
+            <span><span class="ldot" style="background:#2E7D32"></span>スコア5（主要食物）</span>
+            <span><span class="ldot" style="background:#66BB6A"></span>4</span>
+            <span><span class="ldot" style="background:#FFA726"></span>3</span>
+            <span><span class="ldot" style="background:#EF5350"></span>1〜2</span>
+            <span><span class="ldot" style="background:#9E9E9E"></span>スコアなし</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">🍂 食物スコア設定</div>
+          <p style="font-size:.78em;color:var(--sub);margin-bottom:10px">種名ごとにイノシシの食物としての重要度（★1〜5）を設定。変更は自動保存されます。</p>
+          <div id="scoreEditor"><div class="loading"><div class="spinner"></div>読込中...</div></div>
+          <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+            <div style="font-size:.8em;font-weight:bold;color:var(--gd);margin-bottom:8px">＋ 種を追加</div>
+            <div style="display:flex;gap:8px;margin-bottom:6px">
+              <input id="newSp" type="text" placeholder="種名" style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:.85em">
+              <select id="newScore" style="padding:6px;border:1px solid var(--border);border-radius:6px">
+                <option>1</option><option>2</option><option>3</option><option>4</option><option value="5" selected>5</option>
+              </select>
+            </div>
+            <button onclick="addScore()" style="width:100%;background:var(--gl);color:white;border:none;padding:7px;border-radius:6px;cursor:pointer;font-size:.85em">追加</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================= TAB 3: DIVERSITY ============================= -->
+    <div id="tab-div" class="tab-section">
+      <div class="card">
+        <div class="card-title">📊 多様度指数ダッシュボード ― Shannon H' 解析</div>
+        <p style="font-size:.85em;color:var(--sub);margin-bottom:14px">
+          地点ごとの Shannon 多様度指数（H'）を自動算出します。H' が高いほど生物多様性が豊かです。<br>
+          指数の変化を追跡することで、生息地の環境変化や保全効果を評価できます。
+        </p>
+        <div class="filter-row">
+          <div class="fg"><label>期間（開始）</label><input type="date" id="dFrom"></div>
+          <div class="fg"><label>期間（終了）</label><input type="date" id="dTo"></div>
+          <div class="fg"><label>カテゴリ</label>
+            <select id="dCat"><option value="">すべて</option><option value="植物">植物</option><option value="昆虫・節足動物">昆虫・節足</option><option value="鳥類">鳥類</option><option value="哺乳類">哺乳類</option></select>
+          </div>
+          <div class="fg"><label>同定ステータス</label>
+            <select id="dStatus"><option value="">すべて</option><option value="ok">承認済のみ</option></select>
+          </div>
+          <button class="btn-run" onclick="runDiv()">🔄 解析</button>
+        </div>
+      </div>
+
+      <div class="stats-grid" id="divStats">
+        <div class="stat-card"><div class="stat-label">調査地点数</div><div class="stat-value" id="s1">—</div></div>
+        <div class="stat-card"><div class="stat-label">確認種数（総計）</div><div class="stat-value" id="s2">—</div></div>
+        <div class="stat-card"><div class="stat-label">最高 H'</div><div class="stat-value" id="s3">—</div><div class="stat-sub" id="s3loc"></div></div>
+        <div class="stat-card"><div class="stat-label">平均 H'</div><div class="stat-value" id="s4">—</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">地点別 Shannon多様度指数（H'）</div>
+        <div class="chart-wrap"><canvas id="divChart"></canvas></div>
+        <div class="insight">
+          <strong>H' 指数の目安：</strong><br>
+          H' ≥ 3.0 = 非常に豊か &nbsp;／&nbsp; 2.0〜3.0 = 豊か &nbsp;／&nbsp; 1.0〜2.0 = 普通 &nbsp;／&nbsp; &lt; 1.0 = 単一種優占（要注意）
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">地点別 詳細データ</div>
+        <div style="overflow-x:auto">
+          <table class="dtable">
+            <thead><tr><th>調査地点</th><th>確認種数 S</th><th>総個体数 N</th><th>H'（Shannon）</th><th>J'（均等度）</th><th>評価</th></tr></thead>
+            <tbody id="divTbody"><tr><td colspan="6" class="empty">解析ボタンを押してください</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================= TAB 4: TREND ============================= -->
+    <div id="tab-trend" class="tab-section">
+      <div class="card">
+        <div class="card-title">📈 個体数トレンド ― 時系列変化の追跡</div>
+        <p style="font-size:.85em;color:var(--sub);margin-bottom:14px">
+          種ごとの観察個体数を月次・年次で集計し、季節変動・長期トレンドを可視化します。
+        </p>
+        <div class="filter-row">
+          <div class="fg"><label>カテゴリ</label>
+            <select id="tCat" onchange="updateSpSel()"><option value="">すべて</option><option value="植物">植物</option><option value="昆虫・節足動物">昆虫・節足</option><option value="鳥類">鳥類</option><option value="哺乳類">哺乳類</option></select>
+          </div>
+          <div class="fg"><label>種名（複数選択可／Ctrl+クリック）</label>
+            <select id="tSp" multiple size="4" style="height:80px;min-width:200px">
+              <option value="__all__" selected>全種（合計）</option>
+            </select>
+          </div>
+          <div class="fg"><label>集計単位</label>
+            <select id="tAgg"><option value="month" selected>月次</option><option value="year">年次</option></select>
+          </div>
+          <div class="fg"><label>表示値</label>
+            <select id="tMetric"><option value="count">個体数（合計）</option><option value="recs">観察回数</option></select>
+          </div>
+          <button class="btn-run" onclick="runTrend()">🔄 解析</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">個体数トレンドグラフ</div>
+        <div class="chart-wrap" style="height:360px"><canvas id="trendChart"></canvas></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">月別統計サマリー</div>
+        <div style="overflow-x:auto">
+          <table class="dtable">
+            <thead><tr><th>期間</th><th>観察回数</th><th>個体数（合計）</th><th>平均個体数/回</th><th>最多確認種</th></tr></thead>
+            <tbody id="trendTbody"><tr><td colspan="5" class="empty">解析ボタンを押してください</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div><!-- /mainApp -->
+
+<script>
+// ================================================================
+// ① グローバル（Firebase は動的初期化）
+// ================================================================
+// ================================================================
+// ② Firebase 初期化（設定直書き）
+// ================================================================
+const firebaseConfig = {
+  apiKey:            "AIzaSyBrjWRfVeSxFJ9rnDeml894Ig990K3EP8s",
+  authDomain:        "bio-observer.firebaseapp.com",
+  projectId:         "bio-observer",
+  storageBucket:     "bio-observer.firebasestorage.app",
+  messagingSenderId: "1051983479580",
+  appId:             "1:1051983479580:web:c7efe96e8889406078f0d9",
+  measurementId:     "G-7EX58C78PZ"
+};
+
+let db, auth;
+
+if (typeof firebase === 'undefined') {
+  // Firebase CDN が読み込めなかった場合（ローカルfile://で開いた場合など）
+  document.getElementById('sdkError').style.display = 'block';
+  document.getElementById('loginBtn').disabled = true;
+  document.getElementById('loginBtn').style.opacity = '0.4';
+} else {
+  firebase.initializeApp(firebaseConfig);
+  db   = firebase.firestore();
+  auth = firebase.auth();
+}
+
+let allRecs = [];
+let charts  = {};
+let leafMap = null;
+
+// ================================================================
+// ③ 認証状態の監視
+// ================================================================
+if (auth) {
+  auth.onAuthStateChanged(u => {
+    document.getElementById('loginScreen').style.display = u ? 'none' : 'flex';
+    document.getElementById('mainApp').style.display    = u ? 'block' : 'none';
+    if (u) init();
+  });
+}
+
+// デフォルト食物スコア（イノシシ主要食物・日本産）
+const DEFAULT_SCORES = {
+  'コナラ':5,'クヌギ':5,'クリ':5,'ミズナラ':5,'アベマキ':5,'シラカシ':5,
+  'アラカシ':5,'ツブラジイ':5,'スダジイ':5,'マテバシイ':5,
+  'ヤマイモ':4,'タケノコ':4,'ヤブツバキ':4,'サルナシ':4,'ヤマグワ':4,
+  'カキノキ':4,'ヤマナシ':4,'イヌガヤ':4,'ヌルデ':4,'ガマズミ':4,'アケビ':4,
+  'ハリギリ':4,'ヘビイチゴ':3,'ニワトコ':3,'マイタケ':3,'ナメコ':3,
+  'ススキ':3,'アザミ':3,'フキ':3,'ワラビ':3,'ゼンマイ':3,'カタクリ':3,
+  'タンポポ':3,'サツマイモ':3,'ジャガイモ':3,'ヤマユリ':3,
+  'スギ':2,'ヒノキ':2,'ヤブラン':2,'シダ類':1,
+};
+let foodScores = {};
+
+const PHENO_TAGS  = ['開花','結実','採餌','繁殖行動','鳴き声','足跡の確認'];
+const PHENO_COLS  = ['#E91E63','#F44336','#4CAF50','#2196F3','#FF9800','#9C27B0'];
+const TREND_COLS  = ['#2E7D32','#1565C0','#E91E63','#FF8F00','#6A1B9A','#00838F','#BF360C'];
+
+// ================================================================
+// ④ 認証
+// ================================================================
+function signIn(){
+  if (!auth) return;
+  auth.signInWithPopup(new firebase.auth.GoogleAuthProvider()).catch(e=>alert(e.message));
+}
+
+// ================================================================
+// ⑥ 初期化
+// ================================================================
+async function init(){
+  // 年セレクター
+  const ySel = document.getElementById('pYear');
+  const cy = new Date().getFullYear();
+  for(let y=cy;y>=cy-6;y--){
+    const o=document.createElement('option');
+    o.value=y; o.text=y+'年'; if(y===cy)o.selected=true;
+    ySel.appendChild(o);
+  }
+  // 日付初期値
+  const now = new Date();
+  document.getElementById('dTo').value   = now.toISOString().slice(0,10);
+  now.setFullYear(now.getFullYear()-1);
+  document.getElementById('dFrom').value = now.toISOString().slice(0,10);
+
+  // 食物スコードロード
+  const saved = localStorage.getItem('bioObs_food');
+  foodScores = saved ? {...DEFAULT_SCORES,...JSON.parse(saved)} : {...DEFAULT_SCORES};
+
+  await loadRecs();
+}
+
+async function loadRecs(){
+  document.getElementById('badge').textContent = '読込中...';
+  try{
+    const snap = await db.collection('records').orderBy('createdAt','desc').get();
+    allRecs = snap.docs.map(d=>({id:d.id,...d.data()}));
+    document.getElementById('badge').textContent = `${allRecs.length} 件`;
+    updateSpSel();
+    buildScoreEditor();
+  }catch(e){
+    document.getElementById('badge').textContent = 'エラー';
+    console.error(e);
+  }
+}
+
+// ================================================================
+// ⑦ タブ切り替え
+// ================================================================
+function switchTab(id, btn){
+  document.querySelectorAll('.tab-section').forEach(el=>el.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(el=>el.classList.remove('active'));
+  document.getElementById('tab-'+id).classList.add('active');
+  btn.classList.add('active');
+  if(id==='food' && !leafMap){ initLeafMap(); runFoodMap(); }
+}
+
+// ================================================================
+// ⑧ フェノロジー解析
+// ================================================================
+function runPheno(){
+  const cat = document.getElementById('pCat').value;
+  const yr  = parseInt(document.getElementById('pYear').value);
+  const sp  = document.getElementById('pSp').value.trim();
+  const beh = document.getElementById('pBeh').value;
+
+  const recs = allRecs.filter(r=>{
+    if(cat && r.category!==cat) return false;
+    if(sp  && !(r.name||'').includes(sp)) return false;
+    if(!r.date) return false;
+    return parseInt(r.date.slice(0,4))===yr;
+  });
+
+  const tags = beh==='all' ? PHENO_TAGS : [beh];
+  const monthly = {}; // tag → [12]
+  tags.forEach(t=>monthly[t]=Array(12).fill(0));
+  recs.forEach(r=>{
+    const m = parseInt(r.date.slice(5,7))-1;
+    (r.behaviors||[]).forEach(b=>{ if(monthly[b]!==undefined) monthly[b][m]++; });
+  });
+
+  // Chart
+  const ctx = document.getElementById('phenoChart').getContext('2d');
+  if(charts.pheno) charts.pheno.destroy();
+  charts.pheno = new Chart(ctx,{
+    type:'line',
+    data:{
+      labels:['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'],
+      datasets: tags.map((t,i)=>({
+        label:t, data:monthly[t],
+        borderColor:PHENO_COLS[i%PHENO_COLS.length],
+        backgroundColor:PHENO_COLS[i%PHENO_COLS.length]+'22',
+        borderWidth:2.5, pointRadius:5, tension:.3, fill:false
+      }))
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{position:'top'},tooltip:{mode:'index',intersect:false}},
+      scales:{
+        y:{beginAtZero:true,ticks:{stepSize:1},title:{display:true,text:'観察記録数'}},
+        x:{title:{display:true,text:yr+'年 月別'}}
+      }
+    }
+  });
+
+  // カレンダーテーブル
+  const spMap = {};
+  recs.forEach(r=>{
+    if(!r.name||!r.date) return;
+    const m = parseInt(r.date.slice(5,7))-1;
+    if(!spMap[r.name]) spMap[r.name]=Array(12).fill(null).map(()=>[]);
+    (r.behaviors||[]).forEach(b=>{ if(PHENO_TAGS.includes(b)) spMap[r.name][m].push(b); });
+  });
+  const sps = Object.keys(spMap).sort();
+  const tbody = document.getElementById('phenoTbody');
+  if(!sps.length){ tbody.innerHTML='<tr><td colspan="13" class="empty">該当データなし</td></tr>'; return; }
+  tbody.innerHTML = sps.slice(0,40).map(name=>{
+    const cells = spMap[name].map(bs=>{
+      if(!bs.length) return '<td></td>';
+      const col = bs.includes('開花')?'#E91E63':bs.includes('結実')?'#F44336':bs.includes('採餌')?'#4CAF50':'#2196F3';
+      return `<td><span class="hcell" style="background:${col}" title="${[...new Set(bs)].join('・')}">${bs[0].slice(0,2)}</span></td>`;
+    }).join('');
+    return `<tr><td>${name}</td>${cells}</tr>`;
+  }).join('');
+
+  // インサイト
+  const peaks = tags.map(t=>{
+    const v=monthly[t]; const mx=Math.max(...v);
+    if(!mx) return null;
+    return `${t}ピーク: ${v.indexOf(mx)+1}月（${mx}件）`;
+  }).filter(Boolean);
+  const ins = document.getElementById('phenoInsight');
+  if(peaks.length){ ins.innerHTML='<strong>📌 ピーク：</strong>'+peaks.join('　／　'); ins.style.display='block'; }
+  else ins.style.display='none';
+}
+
+// ================================================================
+// ⑨ 食物資源マップ
+// ================================================================
+function initLeafMap(){
+  leafMap = L.map('foodMap').setView([35.5,137.5],9);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+    attribution:'© OpenStreetMap contributors', maxZoom:18
+  }).addTo(leafMap);
+}
+
+function scoreColor(s){
+  return s>=5?'#2E7D32':s>=4?'#66BB6A':s>=3?'#FFA726':s>=2?'#EF5350':'#9E9E9E';
+}
+
+function monthToSeason(m){
+  if([3,4,5].includes(m)) return 'spring';
+  if([6,7,8].includes(m)) return 'summer';
+  if([9,10,11].includes(m)) return 'autumn';
+  return 'winter';
+}
+
+function runFoodMap(){
+  if(!leafMap) return;
+  leafMap.eachLayer(l=>{ if(l instanceof L.CircleMarker) leafMap.removeLayer(l); });
+  const season  = document.getElementById('fSeason').value;
+  const minScr  = parseInt(document.getElementById('fMin').value);
+  let cnt=0;
+  allRecs.forEach(r=>{
+    if(!r.lat||!r.lng) return;
+    if(season && r.date){
+      if(monthToSeason(parseInt(r.date.slice(5,7)))!==season) return;
+    }
+    let scr = foodScores[r.name]||0;
+    if(!scr){
+      const bs=r.behaviors||[];
+      if(bs.includes('結実')||bs.includes('採餌')) scr=Math.max(scr,2);
+      if(bs.some(b=>['土や落葉を掘り返した痕','樹皮剥ぎ・果実の食べ痕など'].includes(b))) scr=Math.max(scr,3);
+    }
+    if(scr<minScr) return;
+    const lat=parseFloat(r.lat), lng=parseFloat(r.lng);
+    if(isNaN(lat)||isNaN(lng)) return;
+    const col=scoreColor(scr);
+    L.circleMarker([lat,lng],{radius:8+scr*2,fillColor:col,color:'white',weight:2,fillOpacity:.85})
+     .bindPopup(`<div style="min-width:180px">
+       <strong>${r.name||'種名未記録'}</strong><br>
+       <span style="color:${col}">${'★'.repeat(scr)}${'☆'.repeat(5-scr)}</span>（食物スコア:${scr}）<br>
+       📍 ${r.location||''}<br>📅 ${r.date||''}<br>
+       👥 ${r.count||'—'}個体<br>
+       🏷 ${(r.behaviors||[]).join('・')||'—'}
+     </div>`)
+     .addTo(leafMap);
+    cnt++;
+  });
+  console.log(`食物マップ: ${cnt}件`);
+}
+
+// ================================================================
+// ⑩ 食物スコアエディター
+// ================================================================
+function buildScoreEditor(){
+  const obs = [...new Set(allRecs.map(r=>r.name).filter(Boolean))];
+  const all = [...new Set([...Object.keys(foodScores),...obs])].sort();
+  const container = document.getElementById('scoreEditor');
+  container.innerHTML = `<ul class="food-list">${
+    all.slice(0,30).map(sp=>{
+      const sc = foodScores[sp]||0;
+      const isObs = obs.includes(sp);
+      const stars = [1,2,3,4,5].map(i=>
+        `<span class="${i<=sc?'on':''}" onclick="setScore('${sp}',${i})">★</span>`
+      ).join('');
+      return `<li class="food-item">
+        <span class="food-name" style="${isObs?'font-weight:600;':'color:#999'}">${sp}</span>
+        <div class="food-score">${stars}</div>
+        <button class="rm-btn" onclick="rmScore('${sp}')">✕</button>
+      </li>`;
+    }).join('')
+  }</ul>`;
+}
+function setScore(sp,v){ foodScores[sp]=v; saveScores(); buildScoreEditor(); }
+function rmScore(sp){ delete foodScores[sp]; saveScores(); buildScoreEditor(); }
+function addScore(){
+  const sp=document.getElementById('newSp').value.trim();
+  if(!sp) return alert('種名を入力してください');
+  foodScores[sp]=parseInt(document.getElementById('newScore').value);
+  saveScores(); buildScoreEditor();
+  document.getElementById('newSp').value='';
+}
+function saveScores(){
+  const custom={};
+  Object.entries(foodScores).forEach(([k,v])=>{ if(DEFAULT_SCORES[k]!==v) custom[k]=v; });
+  localStorage.setItem('bioObs_food',JSON.stringify(custom));
+}
+
+// ================================================================
+// ⑪ 多様度指数（Shannon H'）
+// ================================================================
+function shannonH(counts){
+  const N=counts.reduce((a,b)=>a+b,0);
+  if(N<=0) return 0;
+  return -counts.reduce((h,c)=>{ if(!c)return h; const p=c/N; return h+p*Math.log(p); },0);
+}
+function shannonJ(H,S){ return S<=1?0:H/Math.log(S); }
+function evalH(h){ return h>=3?'🟢 非常に豊か':h>=2?'🔵 豊か':h>=1?'🟡 普通':'🔴 単一種優占'; }
+
+function runDiv(){
+  const from   = document.getElementById('dFrom').value;
+  const to     = document.getElementById('dTo').value;
+  const cat    = document.getElementById('dCat').value;
+  const status = document.getElementById('dStatus').value;
+
+  let recs = allRecs.filter(r=>{
+    if(cat && r.category!==cat) return false;
+    if(from && r.date<from) return false;
+    if(to   && r.date>to)   return false;
+    if(status==='ok'){
+      const ok=(r.idChecks||[]).some(c=>c.status==='ok');
+      if(!ok) return false;
+    }
+    return true;
+  });
+
+  const locMap={};
+  recs.forEach(r=>{
+    const loc=r.location||'地点不明';
+    const sp =r.name||'種名不明';
+    if(!locMap[loc]) locMap[loc]={};
+    locMap[loc][sp]=(locMap[loc][sp]||0)+(parseInt(r.count)||1);
+  });
+
+  const results=Object.entries(locMap).map(([loc,sc])=>{
+    const counts=Object.values(sc);
+    const S=counts.length, N=counts.reduce((a,b)=>a+b,0);
+    const H=shannonH(counts), J=shannonJ(H,S);
+    return {loc,S,N,H:Math.round(H*100)/100,J:Math.round(J*100)/100};
+  }).sort((a,b)=>b.H-a.H);
+
+  if(!results.length){
+    document.getElementById('divTbody').innerHTML='<tr><td colspan="6" class="empty">該当データなし</td></tr>';
+    return;
+  }
+
+  const avgH=(results.reduce((a,r)=>a+r.H,0)/results.length);
+  const allSp=new Set(recs.map(r=>r.name).filter(Boolean));
+  document.getElementById('s1').textContent=results.length;
+  document.getElementById('s2').textContent=allSp.size+'種';
+  document.getElementById('s3').textContent=results[0].H.toFixed(2);
+  document.getElementById('s3loc').textContent=results[0].loc;
+  document.getElementById('s4').textContent=avgH.toFixed(2);
+
+  const ctx=document.getElementById('divChart').getContext('2d');
+  if(charts.div) charts.div.destroy();
+  charts.div=new Chart(ctx,{
+    type:'bar',
+    data:{
+      labels:results.map(r=>r.loc),
+      datasets:[{
+        label:"Shannon H'",
+        data:results.map(r=>r.H),
+        backgroundColor:results.map(r=>r.H>=3?'#2E7D32':r.H>=2?'#66BB6A':r.H>=1?'#FFA726':'#EF5350'),
+        borderRadius:4
+      }]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{footer:items=>{
+        const r=results[items[0].dataIndex];
+        return `S=${r.S}種 / N=${r.N}個体 / J'=${r.J}`;
+      }}}},
+      scales:{y:{beginAtZero:true,title:{display:true,text:"H'（Shannon多様度指数）"}}}
+    }
+  });
+
+  document.getElementById('divTbody').innerHTML=results.map(r=>
+    `<tr><td>${r.loc}</td><td>${r.S}種</td><td>${r.N}個体</td><td><strong>${r.H.toFixed(2)}</strong></td><td>${r.J.toFixed(2)}</td><td>${evalH(r.H)}</td></tr>`
+  ).join('');
+}
+
+// ================================================================
+// ⑫ 個体数トレンド
+// ================================================================
+function updateSpSel(){
+  const cat=document.getElementById('tCat').value;
+  const recs=cat?allRecs.filter(r=>r.category===cat):allRecs;
+  const sps=[...new Set(recs.map(r=>r.name).filter(Boolean))].sort();
+  const sel=document.getElementById('tSp');
+  sel.innerHTML='<option value="__all__" selected>全種（合計）</option>'+sps.map(s=>`<option value="${s}">${s}</option>`).join('');
+}
+
+function periodKey(date,agg){
+  if(!date) return null;
+  if(agg==='year')  return date.slice(0,4);
+  return date.slice(0,7); // month: YYYY-MM
+}
+
+function runTrend(){
+  const cat    = document.getElementById('tCat').value;
+  const selSps = [...document.getElementById('tSp').selectedOptions].map(o=>o.value);
+  const agg    = document.getElementById('tAgg').value;
+  const metric = document.getElementById('tMetric').value;
+  const isAll  = selSps.includes('__all__');
+
+  const recs=allRecs.filter(r=>{
+    if(cat && r.category!==cat) return false;
+    if(!isAll && !selSps.includes(r.name)) return false;
+    return !!r.date;
+  });
+
+  const periods=new Set();
+  const spData={};
+  const spList = isAll?['__all__']:selSps;
+  spList.forEach(sp=>spData[sp]={});
+
+  recs.forEach(r=>{
+    const p=periodKey(r.date,agg); if(!p) return;
+    periods.add(p);
+    const sp=isAll?'__all__':r.name;
+    if(!spData[sp]) return;
+    if(!spData[sp][p]) spData[sp][p]={count:0,recs:0};
+    spData[sp][p].count+=(parseInt(r.count)||1);
+    spData[sp][p].recs+=1;
+  });
+
+  const pArr=[...periods].sort();
+  const datasets=spList.map((sp,i)=>({
+    label: sp==='__all__'?'全種合計':sp,
+    data: pArr.map(p=>(spData[sp]?.[p]?.[metric==='count'?'count':'recs'])||0),
+    borderColor:TREND_COLS[i%TREND_COLS.length],
+    backgroundColor:TREND_COLS[i%TREND_COLS.length]+'20',
+    borderWidth:2.5, pointRadius:4, tension:.2, fill:false
+  }));
+
+  const ctx=document.getElementById('trendChart').getContext('2d');
+  if(charts.trend) charts.trend.destroy();
+  charts.trend=new Chart(ctx,{
+    type:'line',
+    data:{labels:pArr,datasets},
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{position:'top'},tooltip:{mode:'index',intersect:false}},
+      scales:{y:{beginAtZero:true,title:{display:true,text:metric==='count'?'個体数':'観察回数'}},
+              x:{ticks:{maxTicksLimit:24}}}
+    }
+  });
+
+  // サマリーテーブル
+  document.getElementById('trendTbody').innerHTML=[...pArr].reverse().slice(0,20).map(p=>{
+    const pr=recs.filter(r=>periodKey(r.date,agg)===p);
+    const tot=pr.reduce((a,r)=>a+(parseInt(r.count)||1),0);
+    const avg=pr.length?(tot/pr.length).toFixed(1):0;
+    const sc={}; pr.forEach(r=>{ sc[r.name||'—']=(sc[r.name||'—']||0)+(parseInt(r.count)||1); });
+    const top=Object.entries(sc).sort((a,b)=>b[1]-a[1])[0]?.[0]||'—';
+    return `<tr><td>${p}</td><td>${pr.length}回</td><td>${tot}個体</td><td>${avg}</td><td>${top}</td></tr>`;
+  }).join('');
+}
+</script>
+</body>
+</html>
