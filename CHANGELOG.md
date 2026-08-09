@@ -1,5 +1,10 @@
 # 変更履歴(CHANGELOG.md)
 
+## 2026-08-09(追加要件登録:Google Drive自動取込 T-110)
+
+- Google Drive受け箱による自動取込・結果返却を承認済み追加要件として登録(Issue #6、着手はT-101完了後・独立PR)
+- ROADMAP.md(承認済み追加要件の節を新設)、TASKS.md(T-110)、AI_HANDOFF.mdへ追記(設計文書への最小限の追記のみ。Drive API実装は未着手)
+
 ## 2026-08-09(CodexレビューT-005指摘対応)
 
 - media_asset:物理DELETE拒否・sha256変更拒否トリガーを追加(原則3)。原本同一性フィールドの方針をD-23へ追記

@@ -49,9 +49,18 @@
 
 ## 次に行うべきこと
 
-1. Codex:T-005 スキーマレビュー(T-004 PRのレビューとして。DATA_MODEL.mdとの突合、追記性・PostgreSQL移行性の確認)
+1. Codex:T-005 再レビュー(指摘対応済み。PR #5)
 2. 調査責任者:T-004 PRのマージ判断
 3. Claude Code:マージ後にT-101 メディア登録(1 Issue = 1 branch = 1 PR)
+4. Claude Code:T-101完了後にT-110 Google Drive自動取込(Issue #6。独立ブランチ・独立PR)
+
+## 承認済み追加要件:Google Drive自動取込(T-110 / Issue #6)
+
+- Driveを受け箱として使う自動取込・結果返却worker。要件詳細・状態管理(discovered〜retry_required)・エラー対応・E2Eスモークテスト手順はIssue #6が正
+- **受け箱フォルダのID・URLとOAuth認証情報はリポジトリへコミットしない**(環境変数で指定。SECURITY.md)。受け箱には短尺テスト動画2本(IMG_3355.MOV / IMG_3356.MOV)があり、最初のE2Eスモークテストに使う(検出精度は合否条件にしない)
+- 将来は約4時間動画を同方式で扱う:チャンクDL・15〜30分チャンク解析・JobStep/RunEventでの進捗記録・再起動後の再開・容量事前確認・一晩処理目標(D-17)維持
+- Drive上の元動画は削除・移動・改名しない。動画をリポジトリへコミットしない
+- 現行スキーマとの対応:sha256 UNIQUE(二重登録防止)、recording_start_basis/certainty、job_step.resume_state_json(再開)、derived_asset(結果物の系譜)。取込状態の持ち方(IngestJob等の新エンティティ)は実装時にDECISIONS.mdへ記録
 
 ## 既知の問題
 
