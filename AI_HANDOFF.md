@@ -17,7 +17,8 @@
 - run:--once/--interval(Ctrl+C安全停止=全遷移コミット済み)/--dry-run(worker.plan_inboxでDrive・DBとも無変更)。単一ワーカー排他ロック(msvcrt/fcntl、`<DATA_ROOT>/ingest.lock`)
 - T-110の状態機械・再試行・安定確認・冪等性は無変更で再利用(worker.pyへの追加はplan_inboxとロックのみ)
 - Windows考慮:コンソールUTF-8化(cp932対策)、msvcrtロック、pathlib
-- テスト10件(Fake Drive・一時DB・合成メディアのみ):migrate冪等/setup再利用/check-config OK・マスク・欠落NG/run --once E2E/dry-run無変更(DL・フォルダ作成・ジョブ作成なし)/不明セッション拒否/二重起動拒否と解放後の起動/Ctrl+C正常終了+ロック解放/status空表示
+- レビュー対応(D-28追記):dry-run/statusは読み取り専用接続(mode=ro)でDB作成・migrationも行わない。非dry-runは設定確認直後・DB/OAuth前にロック取得(後発はDB・token不接触)。--intervalは1以上のみ
+- テスト14件(Fake Drive・一時DB・合成メディアのみ):migrate冪等/setup再利用/check-config OK・マスク・欠落NG/run --once E2E/dry-run無変更(DL・フォルダ作成・ジョブ作成なし)/不明セッション拒否/二重起動拒否と解放後の起動/Ctrl+C正常終了+ロック解放/status空表示/DB未初期化のdry-run・statusがDBを作らない/ロックが DB・OAuthより先/interval入力制約
 
 ## T-110実装の要点(レビュー観点)
 
@@ -101,7 +102,7 @@
 
 ## 実行したテスト/テスト結果
 
-- `pytest`:78件すべてパス(環境確認7件+DB27件+メディア登録19件+Drive取込15件+CLI10件)
+- `pytest`:82件すべてパス(環境確認7件+DB27件+メディア登録19件+Drive取込15件+CLI14件)
 - DBテスト内訳:空DBへの最新スキーマ構築/1バージョンずつの段階的マイグレーション/再実行の冪等性/外部キー有効化・integrity_check/正確座標列の不存在検査/不透明IDポリシー/UTCヘルパー/FK違反拒否/一意制約/enum CHECK拒否/SED由来・種候補なしAudioDetection保存/統合後の生スコア保持/ReferenceObservation精査情報+二重確認CHECK/review追記専用/analysis_run完了後凍結/run_event・access_log追記専用/DetectionLink確定に人の記録必須
 - `bio-observer-envcheck`:すべてOK(Python 3.11.15 / ffmpeg 6.1.1 / ffprobe 6.1.1 / 設定読み込み)
 - ライブラリ比較:birdnet 0.2.16・birdnet-analyzer 2.4.0のインストール・API検証(詳細はD-22)。推論は未実施(T-103申し送り)

@@ -1,5 +1,12 @@
 # 変更履歴(CHANGELOG.md)
 
+## 2026-08-09(T-111レビュー対応:dry-runの完全読み取り専用化・ロック取得の前倒し)
+
+- dry-run/statusをSQLite読み取り専用接続(mode=ro URI)へ変更。DB未初期化でもDBファイルを作成せず案内して終了(migrationも走らない)
+- 非dry-runのrunは設定確認直後・DB/OAuthへ触れる前に排他ロックを取得(後発プロセスはDB・tokenへ一切触れずに拒否される)
+- --intervalは1以上の整数のみ受理(0・負数・非整数は引数エラー)
+- 回帰テスト4件追加(全82件パス)。D-28追記
+
 ## 2026-08-09(T-111 取込CLI。Issue #10)
 
 - `bio_observer.cli`(console script `bio-observer`)追加:migrate/setup/check-config/run/status(D-28)

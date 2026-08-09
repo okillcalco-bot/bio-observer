@@ -207,6 +207,11 @@ with birdnet.AcousticPredictionSession(model) as s:
 - **テスト方針**:client_factory注入によりFake Driveで全コマンドを検証(実Drive・OAuth・位置情報を使わない)。Windows考慮:コンソールUTF-8化(cp932対策)、msvcrtロック、pathlib。
 - 実行手順・E2Eチェックリストは docs/WINDOWS_E2E.md が正。
 
+**追記(2026-08-09、T-111レビュー対応)**
+- **dry-run・statusの完全読み取り専用化**:一覧確認モードはDBの新規作成・マイグレーションも行わない。SQLite読み取り専用接続(`file:…?mode=ro` URI。ファイルを作成しない)を使い、DB未初期化なら案内して終了する。スキーマ未適用は OperationalError を捕捉して migrate を案内。
+- **排他ロックの取得順序**:非dry-runの run は「.env設定確認の直後・DB接続/マイグレーション/OAuth client生成の前」にロックを取得する。二重起動した後発プロセスは、拒否されるまでにDB・tokenへ一切触れない(テストで検証:client_factory不呼出し・DBファイル不作成)。
+- **--interval の入力制約**:1以上の整数のみ受理(argparse型検証)。0・負数・非整数は引数エラーとし、API連打・実行時例外を防ぐ。
+
 ---
 
 ## 旧・判断待ち事項の決定(P-1〜P-8 → D-14〜D-21)

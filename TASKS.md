@@ -29,7 +29,7 @@
 | T-107 | CSV出力(音声) | AI候補/人の判定の区別、位置丸め(MVP要件13) | Claude Code | 未着手 |
 | T-108 | M1検証 | 実サンプル動画での動作検証、誤検出・見逃しの初期評価 | Codex | 未着手 |
 | T-110 | Google Drive自動取込・結果返却 | IngestJob/IngestEvent(0002)、完了判定(時間間隔つき連続確認)、チャンクDL+サイズ検証、二重解析防止、results/<job_id>/返却(冪等)、再開・再試行、解析hook差込点(D-27)。Codex承認済み・PR #9でmainへマージ | Claude Code | 完了(Issue #6) |
-| T-111 | 取込CLI | migrate/setup/check-config/run(--once/--interval/--dry-run)/status。単一ワーカー排他ロック、Ctrl+C安全停止、秘密情報マスク、OAuth前設定検査、Windows手順+E2Eチェックリスト(docs/WINDOWS_E2E.md)(D-28)。テスト10件 | Claude Code | 実装完了・Codexレビュー待ち(Issue #10、PR作成済み) |
+| T-111 | 取込CLI | migrate/setup/check-config/run(--once/--interval/--dry-run)/status。単一ワーカー排他ロック、Ctrl+C安全停止、秘密情報マスク、OAuth前設定検査、Windows手順+E2Eチェックリスト(docs/WINDOWS_E2E.md)(D-28)。レビュー対応:dry-run/statusの完全読み取り専用化・ロック取得前倒し・interval入力制約。テスト14件 | Claude Code | 実装完了・Codexレビュー待ち(Issue #10、PR作成済み) |
 
 ## フェーズ2:映像パイプライン(M2)
 

@@ -175,3 +175,57 @@ def test_status_empty_message(env, capsys):
     capsys.readouterr()
     assert main(["status"]) == 0
     assert "まだありません" in capsys.readouterr().out
+
+
+def _db_file(env):
+    return env / "db" / "bio_observer.sqlite3"
+
+
+def test_dry_run_without_db_does_not_create_db(env, capsys):
+    """DB未初期化でのdry-runはDBを作成せず案内して終了する(完全読み取り専用)。"""
+    assert not _db_file(env).exists()
+    code = main(["run", "--session", "ses_x", "--once", "--dry-run"],
+                client_factory=lambda: FakeDrive())
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "migrate" in out
+    assert not _db_file(env).exists()  # DBファイルが作られていない
+
+
+def test_status_without_db_does_not_create_db(env, capsys):
+    assert not _db_file(env).exists()
+    assert main(["status"]) == 1
+    assert "migrate" in capsys.readouterr().out
+    assert not _db_file(env).exists()
+
+
+def test_lock_acquired_before_db_and_oauth(env, capsys):
+    """後発プロセスはロック拒否までにDB・OAuth(client生成)へ一切触れない。"""
+    from bio_observer.config import StorageConfig
+    storage = StorageConfig.load()
+    held = worker.acquire_single_instance_lock(storage)  # 先行ワーカーを再現
+    factory_calls = []
+
+    def forbidden_factory():
+        factory_calls.append(1)
+        raise AssertionError("後発プロセスがOAuth clientへ触れた")
+
+    try:
+        assert not _db_file(env).exists()  # DB未初期化のまま二重起動させる
+        code = main(["run", "--session", "ses_x", "--once"],
+                    client_factory=forbidden_factory)
+        out = capsys.readouterr().out
+        assert code == 1 and "既に起動しています" in out
+        assert factory_calls == []              # OAuth clientを生成していない
+        assert not _db_file(env).exists()       # DBも作成・migrateしていない
+    finally:
+        held.close()
+
+
+def test_interval_must_be_positive(env, capsys):
+    for bad in ("0", "-5", "abc"):
+        with pytest.raises(SystemExit) as exc:
+            main(["run", "--session", "ses_x", "--interval", bad],
+                 client_factory=lambda: FakeDrive())
+        assert exc.value.code == 2  # argparseの引数エラー
+    capsys.readouterr()

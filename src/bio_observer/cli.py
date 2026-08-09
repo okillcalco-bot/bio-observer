@@ -56,6 +56,19 @@ def _open_db(storage: StorageConfig) -> sqlite3.Connection:
     return conn
 
 
+def _connect_readonly(db_path) -> sqlite3.Connection:
+    """読み取り専用でDBへ接続する(DBファイルの新規作成・変更を行わない)。
+
+    dry-run・statusなどの一覧確認モード用。DBが未初期化なら FileNotFoundError。
+    """
+    path = Path(db_path)
+    if not path.is_file():
+        raise FileNotFoundError(str(path))
+    conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 # ---------------- migrate ----------------
 
 def cmd_migrate(_args) -> int:
@@ -188,6 +201,39 @@ def _print_summary(summary) -> None:
           f"失敗: {summary.failed}")
 
 
+def _cmd_run_dry(args, storage: StorageConfig, cfg: DriveIngestConfig,
+                 client_factory) -> int:
+    """dry-run:読み取り専用の一覧確認。Drive・DBとも一切変更しない。
+
+    DB作成・マイグレーションも行わない(未初期化なら案内して終了)。
+    """
+    try:
+        conn = _connect_readonly(storage.db_path)
+    except FileNotFoundError:
+        print("[NG] DBが未初期化です(dry-runはDBを作成しません)。"
+              "先に bio-observer migrate / setup を実行してください")
+        return 1
+    try:
+        session = conn.execute("SELECT id FROM survey_session WHERE id = ?",
+                               (args.session,)).fetchone()
+        if session is None:
+            print(f"[NG] SurveySessionがありません: {args.session}"
+                  "(bio-observer setup で作成してください)")
+            return 1
+        client = client_factory()
+        print("dry-run:受け箱の一覧のみ表示します(Drive・DBとも変更しません)")
+        for plan in worker.plan_inbox(conn, client, cfg):
+            size = plan["size_bytes"] if plan["size_bytes"] is not None else "?"
+            print(f"  {plan['name']}  size={size}  → {plan['action']}")
+        return 0
+    except sqlite3.OperationalError as exc:
+        print(f"[NG] DBスキーマが未適用または古い可能性があります({exc})。"
+              "bio-observer migrate を実行してください")
+        return 1
+    finally:
+        conn.close()
+
+
 def cmd_run(args, client_factory) -> int:
     storage = StorageConfig.load()  # .env を読み込む
     missing = [n for n in _REQUIRED_ENV if not os.environ.get(n)]
@@ -196,30 +242,27 @@ def cmd_run(args, client_factory) -> int:
             print(f"[NG] {name}: 未設定(.env を確認。bio-observer check-config で検査できます)")
         return 1
     cfg = DriveIngestConfig.load()
-    conn = _open_db(storage)
+
+    if args.dry_run:
+        return _cmd_run_dry(args, storage, cfg, client_factory)
+
+    # 設定確認の直後・DB/OAuthへ触れる前に排他ロックを取得する
+    # (二重起動した後発プロセスがDB・tokenへ一切触れないことを保証)
     try:
-        session = conn.execute("SELECT id FROM survey_session WHERE id = ?",
-                               (args.session,)).fetchone()
-        if session is None:
-            print(f"[NG] SurveySessionがありません: {args.session}"
-                  "(bio-observer setup で作成してください)")
-            return 1
-
-        client = client_factory()
-
-        if args.dry_run:
-            print("dry-run:受け箱の一覧のみ表示します(Drive・DBとも変更しません)")
-            for plan in worker.plan_inbox(conn, client, cfg):
-                size = plan["size_bytes"] if plan["size_bytes"] is not None else "?"
-                print(f"  {plan['name']}  size={size}  → {plan['action']}")
-            return 0
-
+        lock = worker.acquire_single_instance_lock(storage)
+    except WorkerAlreadyRunningError as exc:
+        print(f"[NG] {exc}")
+        return 1
+    try:
+        conn = _open_db(storage)
         try:
-            lock = worker.acquire_single_instance_lock(storage)
-        except WorkerAlreadyRunningError as exc:
-            print(f"[NG] {exc}")
-            return 1
-        try:
+            session = conn.execute("SELECT id FROM survey_session WHERE id = ?",
+                                   (args.session,)).fetchone()
+            if session is None:
+                print(f"[NG] SurveySessionがありません: {args.session}"
+                      "(bio-observer setup で作成してください)")
+                return 1
+            client = client_factory()
             while True:
                 summary = worker.run_cycle(conn, client, cfg, storage, args.session)
                 print(f"{utc_now_iso()} サイクル完了")
@@ -232,22 +275,31 @@ def cmd_run(args, client_factory) -> int:
                   "次回の run で未完了ジョブから再開されます。")
             return 0
         finally:
-            lock.close()
+            conn.close()
     finally:
-        conn.close()
+        lock.close()
 
 
 # ---------------- status ----------------
 
 def cmd_status(args) -> int:
     storage = StorageConfig.load()
-    conn = _open_db(storage)
     try:
-        rows = conn.execute(
-            "SELECT id, original_file_name, status, retry_count, error, "
-            "media_asset_id, duplicate_of_media_asset_id, updated_at "
-            "FROM ingest_job ORDER BY created_at DESC LIMIT ?",
-            (args.limit,)).fetchall()
+        conn = _connect_readonly(storage.db_path)  # 一覧確認はDBを作成・変更しない
+    except FileNotFoundError:
+        print("[NG] DBが未初期化です。先に bio-observer migrate を実行してください")
+        return 1
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT id, original_file_name, status, retry_count, error, "
+                "media_asset_id, duplicate_of_media_asset_id, updated_at "
+                "FROM ingest_job ORDER BY created_at DESC LIMIT ?",
+                (args.limit,)).fetchall()
+        except sqlite3.OperationalError as exc:
+            print(f"[NG] DBスキーマが未適用または古い可能性があります({exc})。"
+                  "bio-observer migrate を実行してください")
+            return 1
         if not rows:
             print("IngestJobはまだありません(bio-observer run で取込を開始してください)")
             return 0
@@ -268,6 +320,17 @@ def cmd_status(args) -> int:
 
 
 # ---------------- entry ----------------
+
+def _positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"整数を指定してください: {value!r}")
+    if number < 1:
+        raise argparse.ArgumentTypeError(
+            f"1以上の整数を指定してください(API連打防止): {value!r}")
+    return number
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -298,8 +361,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--session", required=True, help="SurveySession ID(setupの出力)")
     mode = run.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true", help="1サイクルのみ実行")
-    mode.add_argument("--interval", type=int, default=300,
-                      help="継続実行の間隔秒(既定300。Ctrl+Cで安全に停止)")
+    mode.add_argument("--interval", type=_positive_int, default=300,
+                      help="継続実行の間隔秒(1以上の整数。既定300。Ctrl+Cで安全に停止)")
     run.add_argument("--dry-run", action="store_true",
                      help="受け箱の一覧と処理予定のみ表示(Drive・DBとも変更しない)")
 
