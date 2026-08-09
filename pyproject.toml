@@ -31,6 +31,7 @@ drive = [
 ]
 
 [project.scripts]
+bio-observer = "bio_observer.cli:entry"
 bio-observer-envcheck = "bio_observer.envcheck:main"
 
 [tool.setuptools.packages.find]

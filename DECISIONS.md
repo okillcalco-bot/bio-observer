@@ -195,6 +195,18 @@ with birdnet.AcousticPredictionSession(model) as s:
 - **重複ジョブの完了は結果返却後**:同一ハッシュ検出時は completed へ直行せず uploading_results へ遷移する。結果返却前にクラッシュしても、再開時に処理対象として残り、必ず結果が返る。
 - **結果返却の冪等性**:DriveClient.upload_file の契約を「同名があれば置換」とする(GoogleDriveClientはname一致のfiles().update、フェイクも同契約)。同じジョブの再試行で status.json 等が増殖しない。
 
+### D-28:取込CLIの設計(T-111)
+- 日付:2026-08-09/決定者:Claude Code(T-111)/Issue #10
+- **フレームワーク**:標準ライブラリ argparse を採用(依存最小方針=D-2/D-23と一貫。サブコマンド:migrate / setup / check-config / run / status)。
+- **単一ワーカー制約**:同一DATA_ROOTに対する取込ワーカーは同時1プロセスのみ。`<DATA_ROOT>/ingest.lock` へのOSレベル排他ロック(Windows: msvcrt.locking、POSIX: fcntl.flock)で保証し、二重起動は起動時にエラー。プロセス終了・クラッシュ時はOSがロックを自動解放する。
+- **Ctrl+C安全停止**:T-110の全状態遷移がDBコミット済みのため、任意時点の中断が安全。KeyboardInterruptを捕捉して「再実行で再開される」旨を案内し正常終了する。
+- **dry-run/statusの読み取り専用保証**:`worker.plan_inbox()`(list_files+DB照会のみ)を新設。dry-runはDrive・DBとも変更しない(ダウンロード・フォルダ作成・ジョブ作成なし。テストで検証)。
+- **秘密情報の非表示**:check-configで受け箱フォルダIDは先頭4文字のみのマスク表示。OAuth情報はパスの存在確認のみ(内容を読まない・表示しない)。CLIはログファイルを作成しない(出力はコンソールのみ)。座標入力欄は設けない(setupの位置は丸め表現のみ。D-12)。
+- **OAuth認可前の設定検査**:check-configはDriveへ接続せず、.env必須4項目・DATA_ROOT書込可否・FFmpeg/FFprobe・DB接続を検査する(tokenファイルは初回認可時に作成されるため未存在を許容)。
+- **setupの再利用性**:Project(name)/Site(project,name)/Station(site,name)は一意制約に基づくget-or-create、SurveySessionは(station,survey_date)一致で再利用。同じコマンドの再実行が同じIDを返す(E2Eの再現性)。
+- **テスト方針**:client_factory注入によりFake Driveで全コマンドを検証(実Drive・OAuth・位置情報を使わない)。Windows考慮:コンソールUTF-8化(cp932対策)、msvcrtロック、pathlib。
+- 実行手順・E2Eチェックリストは docs/WINDOWS_E2E.md が正。
+
 ---
 
 ## 旧・判断待ち事項の決定(P-1〜P-8 → D-14〜D-21)

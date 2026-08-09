@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import shutil
 import sqlite3
 from dataclasses import dataclass
@@ -355,3 +356,53 @@ def run_cycle(conn: sqlite3.Connection, client: DriveClient, cfg: DriveIngestCon
     summary = process_pending(conn, client, cfg, storage, analysis_hook=analysis_hook)
     summary.discovered = len(created)
     return summary
+
+
+def plan_inbox(conn: sqlite3.Connection, client: DriveClient,
+               cfg: DriveIngestConfig) -> list[dict]:
+    """受け箱の一覧と処理予定を返す(読み取り専用:Drive・DBとも変更しない)。"""
+    plans: list[dict] = []
+    for info in client.list_files(cfg.inbox_folder_id):
+        ext = Path(info.name).suffix.lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            action = "skip(非対応形式)"
+        else:
+            job = conn.execute(
+                "SELECT id, status FROM ingest_job "
+                "WHERE source = 'google_drive' AND drive_file_id = ?",
+                (info.file_id,),
+            ).fetchone()
+            action = f"既存ジョブ {job['id']}({job['status']})" if job else "new(次のrunで取込)"
+        plans.append({"name": info.name, "file_id": info.file_id,
+                      "size_bytes": info.size_bytes, "modified": info.modified_time,
+                      "action": action})
+    return plans
+
+
+class WorkerAlreadyRunningError(RuntimeError):
+    """同一DATA_ROOTに対する取込ワーカーの二重起動。"""
+
+
+def acquire_single_instance_lock(storage: StorageConfig):
+    """単一ワーカー制約(D-28)を排他的ファイルロックで保証する。
+
+    同じDATA_ROOTに対して取込ワーカーは同時に1プロセスのみ。ロックは
+    <DATA_ROOT>/ingest.lock に対する OSレベルの排他ロック(Windows: msvcrt、
+    POSIX: fcntl)で、プロセス終了・クラッシュ時はOSが自動解放する。
+    戻り値のファイルオブジェクトを保持し続けること(クローズで解放)。
+    """
+    storage.data_root.mkdir(parents=True, exist_ok=True)
+    lock_path = storage.data_root / "ingest.lock"
+    handle = open(lock_path, "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise WorkerAlreadyRunningError(
+            "取込ワーカーが既に起動しています(同一DATA_ROOTで同時実行できるのは1プロセスのみ)")
+    return handle

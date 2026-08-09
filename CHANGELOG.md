@@ -1,5 +1,15 @@
 # 変更履歴(CHANGELOG.md)
 
+## 2026-08-09(T-111 取込CLI。Issue #10)
+
+- `bio_observer.cli`(console script `bio-observer`)追加:migrate/setup/check-config/run/status(D-28)
+- setup:Project/Site/Station/SurveySessionの名前ベースget-or-create(再実行で同じIDを再利用)。位置は丸め表現のみ
+- check-config:OAuth認可前の設定検査(Drive未接続。フォルダIDはマスク表示、OAuth情報は存在確認のみ)
+- run:--once/--interval(Ctrl+C安全停止)/--dry-run(worker.plan_inbox新設。Drive・DBとも変更しない)
+- 単一ワーカー排他ロック(`<DATA_ROOT>/ingest.lock`、Windows msvcrt/POSIX fcntl)で二重起動を防止
+- Windows実行手順+実機E2Eチェックリスト8項目を docs/WINDOWS_E2E.md に新設。READMEへCLI節を追加
+- CLIテスト10件追加(Fake Drive・一時DB・合成メディアのみ。全78件パス)。T-110の状態機械・冪等性は無変更
+
 ## 2026-08-09(T-110レビュー対応:完了判定の時間間隔・再試行の詰まり解消・重複の返却保証)
 
 - アップロード完了判定へ最小時間間隔(既定60秒)を導入。間隔不足の観測は確認回数に数えない(連続実行での途中取得を防止)
