@@ -1,5 +1,15 @@
 # 変更履歴(CHANGELOG.md)
 
+## 2026-08-09(T-110 Google Drive自動取込。Issue #6)
+
+- マイグレーション0002:ingest_job(取込状態機械)+ingest_event(追記専用の遷移ログ)を追加(DATA_MODEL.md 3.20/3.21、D-27)
+- bio_observer.ingest:DriveClientプロトコル+GoogleDriveClient実装(optional `drive`:google-api-python-client 2.198.0等をピン留め)、取込ワーカー(発見→完了判定→安全DL→登録→結果返却)
+- アップロード完了判定(サイズ・modifiedTime連続確認)、.partチャンクDL+サイズ検証、容量事前確認、二重解析防止(File ID+SHA-256)、retry_required→failed、PC再起動後の再開
+- results/<job_id>/ へ status.json・summary.csv を返却(入力フォルダを汚さない。座標・希少種名なし)
+- 解析パイプラインはanalysis_hookとして分離(T-102以降で接続)
+- フェイクDriveクライアントによるテスト10件追加(全63件パス)。実機E2E(IMG_3355/3356.MOV)はWindows解析PCで実施予定
+- フォルダID・OAuth情報は環境変数管理(.env.exampleにテンプレート追加。実値はコミットしない)
+
 ## 2026-08-09(T-101最終レビュー対応:フォールバックコピーの読み戻し照合)
 
 - ハードリンク非対応FS向けフォールバックで、コピー後にfinalを読み戻してSHA-256・サイズを期待値と照合。不一致(コピー破損)時はDB行・一時ファイル・確定ファイルを完全に取り消す

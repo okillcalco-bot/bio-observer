@@ -23,6 +23,12 @@ dev = [
 audio = [
     "birdnet==0.2.16",
 ]
+# Google Drive自動取込(T-110/D-27で使用。テストはフェイククライアントで依存不要)
+drive = [
+    "google-api-python-client==2.198.0",
+    "google-auth==2.56.3",
+    "google-auth-oauthlib==1.4.0",
+]
 
 [project.scripts]
 bio-observer-envcheck = "bio_observer.envcheck:main"

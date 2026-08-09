@@ -20,7 +20,7 @@
 
 | ID | タスク | 内容 | 担当 | 状態 |
 |---|---|---|---|---|
-| T-101 | メディア登録 | 動画・音声取込(media_registry)、ストリーミングSHA-256+二重登録防止、FFprobeメタデータ、一時ファイル→照合→atomic rename、失敗時クリーンアップ、既存資産の不可侵・排他的確定、撮影開始日時の確実性ポリシー、確定処理の完全ロールバック・排他的フォールバック+読み戻し照合(D-26)。テスト19件(MVP要件1-3) | Claude Code | 実装完了・Codexレビュー待ち(Issue #7、PR作成済み) |
+| T-101 | メディア登録 | 動画・音声取込(media_registry)、ストリーミングSHA-256+二重登録防止、FFprobeメタデータ、一時ファイル→照合→atomic rename、失敗時クリーンアップ、既存資産の不可侵・排他的確定、撮影開始日時の確実性ポリシー、確定処理の完全ロールバック・排他的フォールバック+読み戻し照合(D-26)。テスト19件(MVP要件1-3)。Codex承認済み・PR #8でmainへマージ | Claude Code | 完了(Issue #7) |
 | T-102 | 音声抽出 | FFmpegで全時間抽出(無劣化優先)(MVP要件4) | Claude Code | 未着手 |
 | T-103 | 音声イベント検出+BirdNET解析 | SED(種分類と独立。D-7)+全時間種分類、AudioDetection保存、AnalysisRun記録(MVP要件5,14)。ライブラリはT-003の決定に従う(D-13) | Claude Code | 未着手 |
 | T-104 | クリップ/スペクトログラム生成 | 前後マージンつき(MVP要件6)。DerivedAssetとして登録(D-9) | Claude Code | 未着手 |
@@ -28,7 +28,7 @@
 | T-106 | 音声確認UI | 候補一覧・再生・スペクトログラム表示・判定入力(判定区分準拠) | Claude Code | 未着手 |
 | T-107 | CSV出力(音声) | AI候補/人の判定の区別、位置丸め(MVP要件13) | Claude Code | 未着手 |
 | T-108 | M1検証 | 実サンプル動画での動作検証、誤検出・見逃しの初期評価 | Codex | 未着手 |
-| T-110 | Google Drive自動取込・結果返却 | Drive受け箱の定期確認→完了判定→安全DL→SHA-256→MediaAsset登録→解析→results/<job_id>/へ返却。取込状態管理・再開・二重解析防止。要件はIssue #6。**T-101完了後に独立ブランチ・独立PRで実装(PR #5へ混ぜない)**。初回は短尺2本(IMG_3355/3356.MOV)でE2Eスモークテスト(検出精度は合否条件外) | Claude Code | 未着手(要件登録済み・Issue #6) |
+| T-110 | Google Drive自動取込・結果返却 | IngestJob/IngestEvent(0002)、完了判定(サイズ・modifiedTime連続確認)、チャンクDL+サイズ検証、二重解析防止(File ID+SHA-256)、results/<job_id>/返却、再開・再試行、解析hook差込点(D-27)。フェイクDriveでテスト10件。実機E2E(IMG_3355/3356.MOV)はWindows解析PCで実施予定 | Claude Code | 実装完了・Codexレビュー待ち(Issue #6、PR作成済み) |
 
 ## フェーズ2:映像パイプライン(M2)
 

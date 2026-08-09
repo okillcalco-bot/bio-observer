@@ -12,6 +12,7 @@ EXPECTED_TABLES = {
     "species", "individual", "behavior",
     "detection_link", "derived_asset", "derived_asset_detection",
     "reference_observation", "export", "access_log",
+    "ingest_job", "ingest_event",
 }
 
 

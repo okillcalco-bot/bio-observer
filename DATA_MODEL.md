@@ -26,6 +26,7 @@ DerivedAsset *─* Detection(DerivedAssetDetection 経由の多対多:1クリッ
 VisualDetection / AudioDetection 1─* Review
 DetectionLink *─* (VisualDetection, AudioDetection)
 SurveySession 1─* ReferenceObservation(精査済み評価データ)
+SurveySession 1─* IngestJob 1─* IngestEvent(Drive受け箱からの取込状態。D-27)
 Species, Individual, Behavior はマスター/参照系
 Export, AccessLog は横断系
 ```
@@ -143,6 +144,17 @@ Export, AccessLog は横断系
 - 動体Trackと抽出クリップの**多対多**関係を表す:1つのクリップに複数のtrackが含まれる、1つのtrackが複数のクリップにまたがる、の両方に対応
 - 同一の(派生物, 検出)組の重複登録は一意制約で拒否
 - **対応づける検出は、その派生物を生成したAnalysisRunの検出に限る**(別Runの検出との誤接続はトリガーで拒否。再現性の保護)
+
+### 3.20 IngestJob(Drive受け箱からの取込ジョブ。D-27)
+- source(google_drive/local)、drive_file_id(source内で一意=同じFile IDを二重取込しない)、**original_file_name(Drive上の表示名。本エンティティでのみ保持し、MediaAsset・保存パスへ露出させない。D-26)**、mime_type、size_bytes、modified_time
+- stable_probe_json(アップロード完了判定用の直近観測:サイズ・modifiedTime・連続確認回数)
+- survey_session_id、media_asset_id(登録成功時)、duplicate_of_media_asset_id(同一ハッシュ既登録時の参照=二重解析防止)
+- status(discovered/waiting_for_upload/downloading/downloaded/registered/queued/analyzing/uploading_results/completed/failed/retry_required)、resume_status(再試行時の復帰先)、retry_count、error
+- results_folder_name(Drive結果フォルダ名=job id。表示用フォルダ名と不透明IDを混同しない)
+
+### 3.21 IngestEvent(取込状態変化の追記ログ)
+- ingest_job_id、occurred_at、from_status、to_status、message、detail_json
+- **追記のみ**(状態は上書きだけでなく必ず本ログへ履歴として残す)
 
 ## 4. 状態遷移(検出候補の確認状態)
 

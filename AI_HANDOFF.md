@@ -7,7 +7,15 @@
 
 ## 現在の状態
 
-フェーズ1(音声パイプライン)開始。T-004はT-005承認を経てPR #5でmainへマージ済み(Issue #4クローズ、main: 80c506d)。T-101(メディア登録)を実装完了し、Codexレビュー待ち(Issue #7、ブランチ claude/t101-media-registration)。音声抽出・BirdNET/SED・映像検出・UI・Drive連携(T-110)は未実装。
+フェーズ1(音声パイプライン)。T-101はCodex承認を経てPR #8でmainへマージ済み(Issue #7クローズ、main: 96d810e)。T-110(Google Drive自動取込)を実装完了し、Codexレビュー待ち(Issue #6、ブランチ claude/t110-drive-ingest)。音声抽出(T-102)・BirdNET/SED(T-103)・映像検出・UIは未実装。
+
+## T-110実装の要点(レビュー観点)
+
+- マイグレーション0002:IngestJob(状態機械)+IngestEvent(追記専用の遷移ログ)。DATA_MODEL.md 3.20/3.21、設計判断はD-27
+- `bio_observer.ingest.worker`:discover(発見・File ID重複排除)→waiting_for_upload(サイズ・modifiedTime連続確認)→downloading(容量確認+.partチャンクDL+サイズ検証)→downloaded→registered(register_media。同一SHA-256はduplicate参照で完了)→queued→(analysis_hook)→uploading_results(results/<job_id>/へstatus.json+summary.csv)→completed。失敗はretry_required(resume_status保持)→上限でfailed
+- `bio_observer.ingest.drive`:DriveClientプロトコル+GoogleDriveClient実装(google-api-python-client。optional `drive` にピン留め)。元動画への操作は読み取りのみ(削除・移動・改名APIなし)
+- テストはフェイクDriveクライアントで全状態遷移を検証(10件)。実Drive APIはOAuth必須のため自動テスト対象外
+- **実機E2Eスモークテスト(申し送り)**:Windows解析PCで `.env` に受け箱フォルダID・OAuth認証情報を設定し、受け箱の IMG_3355.MOV / IMG_3356.MOV で Issue #6 の8項目を確認する(音声抽出・派生物生成はT-102/T-104接続後)。検出精度は合否条件にしない
 
 ## 完了したこと
 
@@ -37,10 +45,11 @@
 
 ## 未完了のこと
 
-- T-101 PRのCodexレビュー・マージ
-- T-102以降(音声抽出、BirdNET/SED、クリップ生成、UI、CSV出力)、T-110(Drive自動取込。T-101マージ後)
-- リモート環境からの `claude/t003-repo-init`・`claude/t004-database-schema` ブランチ削除(ref削除権限403。GitHub上で手動削除)
-- 実地スモークテスト用の短尺動画はT-110のE2Eテストで使用する(リポジトリへはコミットしない)
+- T-110 PRのCodexレビュー・マージ
+- T-110実機E2Eスモークテスト(Windows解析PC。上記申し送り参照)
+- T-102以降(音声抽出、BirdNET/SED、クリップ生成、UI、CSV出力)
+- リモート環境からのマージ済みブランチ削除(ref削除権限403。GitHub上で手動削除)
+- 短尺動画はDrive受け箱にあり、リポジトリへはコミットしない
 - **M1着手時(T-103)にローカル解析機で必ず実施する申し送り事項**(結果はDECISIONS.md D-22とTHIRD_PARTY_LICENSES.mdへ追記):
   1. **ローカル推論スモークテスト**:モデルダウンロード+合成WAVでの推論実行+処理速度計測(本検証環境ではモデル配布元 zenodo.org / tuc.cloud がegressポリシーで遮断され未実施)
   2. **audio推移依存のlock生成**:推論成功後に `pip freeze` でaudio依存を含むlock(`requirements-audio.lock`)を生成する(現状 `requirements-dev.lock` は開発依存のみ。birdnet本体は0.2.16固定だが推移依存は未固定)
@@ -50,9 +59,9 @@
 
 ## 次に行うべきこと
 
-1. Codex:T-101 PRのレビュー(media_registryのD-26遵守・クリーンアップ保証・テスト網羅の確認)
-2. 調査責任者:T-101 PRのマージ判断
-3. Claude Code:マージ後にT-110 Google Drive自動取込(Issue #6。独立ブランチ・独立PR)、並行してT-102 音声抽出
+1. Codex:T-110 PRのレビュー(状態機械・再開性・二重解析防止・Drive読み取り専用の確認)
+2. 調査責任者:T-110 PRのマージ判断
+3. マージ後:Windows解析PCでの実機E2Eスモークテスト(IMG_3355/3356.MOV)、並行してClaude CodeがT-102 音声抽出へ着手
 
 ## T-101実装の要点(レビュー観点)
 
@@ -81,7 +90,7 @@
 
 ## 実行したテスト/テスト結果
 
-- `pytest`:53件すべてパス(環境確認7件+DB27件+メディア登録19件)
+- `pytest`:63件すべてパス(環境確認7件+DB27件+メディア登録19件+Drive取込10件)
 - DBテスト内訳:空DBへの最新スキーマ構築/1バージョンずつの段階的マイグレーション/再実行の冪等性/外部キー有効化・integrity_check/正確座標列の不存在検査/不透明IDポリシー/UTCヘルパー/FK違反拒否/一意制約/enum CHECK拒否/SED由来・種候補なしAudioDetection保存/統合後の生スコア保持/ReferenceObservation精査情報+二重確認CHECK/review追記専用/analysis_run完了後凍結/run_event・access_log追記専用/DetectionLink確定に人の記録必須
 - `bio-observer-envcheck`:すべてOK(Python 3.11.15 / ffmpeg 6.1.1 / ffprobe 6.1.1 / 設定読み込み)
 - ライブラリ比較:birdnet 0.2.16・birdnet-analyzer 2.4.0のインストール・API検証(詳細はD-22)。推論は未実施(T-103申し送り)
@@ -93,9 +102,8 @@
 
 ## 関連コミット
 
-- 設計:PR #1(main: 24c56d2)
-- T-003:PR #3(main: 5014c90、Issue #2クローズ)
-- T-004:本ブランチ claude/t004-database-schema(Issue #4)
+- 設計:PR #1(main: 24c56d2)/T-003:PR #3(main: 5014c90)/T-004:PR #5(main: 80c506d)/T-101:PR #8(main: 96d810e)
+- T-110:本ブランチ claude/t110-drive-ingest(Issue #6)
 
 ## 変更してはいけない事項
 
