@@ -22,6 +22,7 @@ import json
 import shutil
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from bio_observer.config import StorageConfig
@@ -123,20 +124,41 @@ def discover(conn: sqlite3.Connection, client: DriveClient, cfg: DriveIngestConf
     return created
 
 
+def _parse_iso(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 def _check_upload_stable(conn: sqlite3.Connection, client: DriveClient,
                          cfg: DriveIngestConfig, job: sqlite3.Row) -> bool:
-    """サイズ・modifiedTimeが連続確認で不変ならTrue(アップロード完了とみなす)。"""
+    """サイズ・modifiedTimeが「最小時間間隔を空けた」連続確認で不変ならTrue。
+
+    間隔(stability_interval_seconds)が足りない観測は確認回数に数えない。
+    ワーカーを連続実行しても、実時間で間隔×(確認回数-1)以上待たないと
+    ダウンロードへ進まない(4時間動画の途中取得防止)。
+    """
     info = client.get_file_info(job["drive_file_id"])
     probe = json.loads(job["stable_probe_json"] or "{}")
+    now = utc_now_iso()
     same = (probe.get("size") == info.size_bytes
             and probe.get("modified") == info.modified_time)
-    confirmations = probe.get("confirmations", 0) + 1 if same else 1
+    if not same:
+        confirmations = 1
+        observed_at = now  # 変化を観測:基準時刻を更新して数え直し
+    else:
+        elapsed = (_parse_iso(now) - _parse_iso(probe["observed_at"])).total_seconds()
+        if elapsed >= cfg.stability_interval_seconds:
+            confirmations = probe.get("confirmations", 1) + 1
+            observed_at = now
+        else:
+            # 間隔不足:確認回数・基準時刻を進めない
+            confirmations = probe.get("confirmations", 1)
+            observed_at = probe["observed_at"]
     conn.execute(
         "UPDATE ingest_job SET stable_probe_json = ?, size_bytes = ?, modified_time = ?, "
         "updated_at = ? WHERE id = ?",
         (json.dumps({"size": info.size_bytes, "modified": info.modified_time,
-                     "confirmations": confirmations, "observed_at": utc_now_iso()}),
-         info.size_bytes, info.modified_time, utc_now_iso(), job["id"]),
+                     "confirmations": confirmations, "observed_at": observed_at}),
+         info.size_bytes, info.modified_time, now, job["id"]),
     )
     conn.commit()
     return confirmations >= cfg.stability_confirmations
@@ -168,21 +190,28 @@ def _download(conn: sqlite3.Connection, client: DriveClient, cfg: DriveIngestCon
 
 def _register(conn: sqlite3.Connection, storage: StorageConfig,
               job: sqlite3.Row, downloaded: Path) -> None:
+    """登録に決着(登録成功/重複確定)した場合のみ一時DLファイルを削除する。
+
+    それ以外の例外(一時的なprobe失敗等)ではファイルを保持したまま伝播し、
+    再試行でダウンロード済みファイルを再利用できるようにする。
+    """
     try:
         result = register_media(
             conn, downloaded, job["survey_session_id"], storage=storage,
             note=f"ingest:{job['id']}",
         )
-        _transition(conn, job["id"], "registered", message="MediaAsset登録完了",
-                    detail={"sha256": result.sha256},
-                    media_asset_id=result.media_asset_id)
     except DuplicateMediaError as exc:
-        # 同一原本は二重解析しない:重複参照を記録して完了
-        _transition(conn, job["id"], "completed",
+        # 同一原本は二重解析しない:重複参照を記録し、結果返却へ進む
+        # (結果返却前にcompletedへせず、クラッシュしても再開時に返却される)
+        _transition(conn, job["id"], "uploading_results",
                     message=f"同一原本が登録済みのためスキップ: {exc.existing_id}",
                     duplicate_of_media_asset_id=exc.existing_id)
-    finally:
-        downloaded.unlink(missing_ok=True)  # ローカル一時DLファイル(原本はoriginals/とDrive)
+        downloaded.unlink(missing_ok=True)
+        return
+    _transition(conn, job["id"], "registered", message="MediaAsset登録完了",
+                detail={"sha256": result.sha256},
+                media_asset_id=result.media_asset_id)
+    downloaded.unlink(missing_ok=True)  # 原本はoriginals/とDrive上に存在
 
 
 def _upload_results(conn: sqlite3.Connection, client: DriveClient,
@@ -274,14 +303,18 @@ def process_pending(conn: sqlite3.Connection, client: DriveClient,
                 job = conn.execute("SELECT * FROM ingest_job WHERE id = ?", (job_id,)).fetchone()
                 downloaded = _tmp_dir(storage) / f"{job_id}{_job_ext(job)}"
                 if not downloaded.exists():
-                    raise OSError("ダウンロード済みファイルが見つかりません(再DLします)")
+                    # 一時ファイル不在(手動削除・別領域の消失等)は詰まらせず再取得する
+                    _transition(conn, job_id, "downloading",
+                                message="ダウンロード済みファイル不在のため再取得")
+                    job = conn.execute("SELECT * FROM ingest_job WHERE id = ?",
+                                       (job_id,)).fetchone()
+                    downloaded = _download(conn, client, cfg, storage, job)
+                    _transition(conn, job_id, "downloaded", message="再取得完了")
+                    job = conn.execute("SELECT * FROM ingest_job WHERE id = ?",
+                                       (job_id,)).fetchone()
                 _register(conn, storage, job, downloaded)
                 job = conn.execute("SELECT * FROM ingest_job WHERE id = ?", (job_id,)).fetchone()
-                status = job["status"]  # registered または completed(重複)
-                if status == "completed":
-                    _upload_results(conn, client, cfg, storage, job)
-                    summary.completed += 1
-                    continue
+                status = job["status"]  # registered または uploading_results(重複)
             if status == "registered":
                 _transition(conn, job_id, "queued")
                 status = "queued"

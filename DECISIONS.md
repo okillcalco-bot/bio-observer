@@ -189,6 +189,12 @@ with birdnet.AcousticPredictionSession(model) as s:
 - **実装方式**:ワーカーはDriveClientプロトコルに依存し、自動テストはフェイク実装で全状態遷移を検証(実Drive APIはネットワーク・OAuth必須のため)。実運用実装はgoogle-api-python-client 2.198.0/google-auth 2.56.3/google-auth-oauthlib 1.4.0(optional-dependencies `drive` にピン留め)。OAuth認証情報・トークン・フォルダIDは環境変数でGit管理外のパス・値を指定(SECURITY.md)。
 - **実機E2Eスモークテスト**:Windows解析PC上で受け箱の短尺2本(IMG_3355/3356.MOV)を用いて実施する(AI_HANDOFF.md申し送り)。
 
+**追記(2026-08-09、T-110レビュー対応)**
+- **完了判定に最小時間間隔を導入**:連続確認は `stability_interval_seconds`(既定60秒)以上の実時間を空けた観測のみ数える。間隔不足の観測は確認回数・基準時刻を進めない(ワーカーを連続実行しても数秒で2回確認扱いにならず、4時間動画の途中取得を防ぐ)。
+- **登録失敗時はDL済みファイルを保持**:一時DLファイルを削除するのは登録に決着した場合(登録成功/重複確定)のみ。一時的な登録失敗では保持したまま再試行し、「ファイルがない」で詰まらない。downloaded状態でファイルが消えていた場合も、エラーにせず再取得(downloading)へ戻して続行する。
+- **重複ジョブの完了は結果返却後**:同一ハッシュ検出時は completed へ直行せず uploading_results へ遷移する。結果返却前にクラッシュしても、再開時に処理対象として残り、必ず結果が返る。
+- **結果返却の冪等性**:DriveClient.upload_file の契約を「同名があれば置換」とする(GoogleDriveClientはname一致のfiles().update、フェイクも同契約)。同じジョブの再試行で status.json 等が増殖しない。
+
 ---
 
 ## 旧・判断待ち事項の決定(P-1〜P-8 → D-14〜D-21)

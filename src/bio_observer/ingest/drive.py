@@ -42,7 +42,10 @@ class DriveClient(Protocol):
         """親フォルダ配下に名前nameのフォルダを(なければ作成して)返す。"""
         ...
 
-    def upload_file(self, folder_id: str, source: Path, name: str) -> str: ...
+    def upload_file(self, folder_id: str, source: Path, name: str) -> str:
+        """フォルダ内へname名でアップロードする。**同名が既にあれば置換する**
+        (冪等:同じジョブの再試行で結果ファイルが増殖しない)。"""
+        ...
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,9 @@ class DriveIngestConfig:
     max_retries: int = 3
     # アップロード完了判定:サイズ・modifiedTimeがこの回数の連続確認で不変であること
     stability_confirmations: int = 2
+    # 連続確認の最小時間間隔(秒)。間隔が足りない観測は確認回数に数えない
+    # (連続実行しても数秒で2回確認扱いにならない=4時間動画の途中取得防止)
+    stability_interval_seconds: int = 60
 
     @classmethod
     def load(cls) -> "DriveIngestConfig":
@@ -67,6 +73,8 @@ class DriveIngestConfig:
             max_retries=int(os.environ.get("BIO_OBSERVER_DRIVE_MAX_RETRIES", "3")),
             stability_confirmations=int(
                 os.environ.get("BIO_OBSERVER_DRIVE_STABILITY_CONFIRMATIONS", "2")),
+            stability_interval_seconds=int(
+                os.environ.get("BIO_OBSERVER_DRIVE_STABILITY_INTERVAL_SECONDS", "60")),
         )
 
 
@@ -165,9 +173,21 @@ class GoogleDriveClient:
         return created["id"]
 
     def upload_file(self, folder_id: str, source: Path, name: str) -> str:
+        """同名ファイルがあれば内容を置換(update)、なければ新規作成(冪等)。"""
         from googleapiclient.http import MediaFileUpload
 
         media = MediaFileUpload(str(source), resumable=True, chunksize=_CHUNK_SIZE)
+        escaped = name.replace("'", "\\'")
+        resp = self._service.files().list(
+            q=f"'{folder_id}' in parents and name = '{escaped}' and trashed = false",
+            fields="files(id)",
+        ).execute()
+        existing = resp.get("files", [])
+        if existing:
+            updated = self._service.files().update(
+                fileId=existing[0]["id"], media_body=media, fields="id",
+            ).execute()
+            return updated["id"]
         created = self._service.files().create(
             body={"name": name, "parents": [folder_id]},
             media_body=media,

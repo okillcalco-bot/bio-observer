@@ -14,7 +14,8 @@
 - マイグレーション0002:IngestJob(状態機械)+IngestEvent(追記専用の遷移ログ)。DATA_MODEL.md 3.20/3.21、設計判断はD-27
 - `bio_observer.ingest.worker`:discover(発見・File ID重複排除)→waiting_for_upload(サイズ・modifiedTime連続確認)→downloading(容量確認+.partチャンクDL+サイズ検証)→downloaded→registered(register_media。同一SHA-256はduplicate参照で完了)→queued→(analysis_hook)→uploading_results(results/<job_id>/へstatus.json+summary.csv)→completed。失敗はretry_required(resume_status保持)→上限でfailed
 - `bio_observer.ingest.drive`:DriveClientプロトコル+GoogleDriveClient実装(google-api-python-client。optional `drive` にピン留め)。元動画への操作は読み取りのみ(削除・移動・改名APIなし)
-- テストはフェイクDriveクライアントで全状態遷移を検証(10件)。実Drive APIはOAuth必須のため自動テスト対象外
+- テストはフェイクDriveクライアントで全状態遷移を検証(15件)。実Drive APIはOAuth必須のため自動テスト対象外
+- レビュー対応(D-27追記):完了判定の最小時間間隔(既定60秒)、登録失敗時のDL済みファイル保持+downloaded状態のファイル不在時再取得、重複ジョブのuploading_results経由完了(返却保証)、upload_fileの同名置換(冪等)
 - **実機E2Eスモークテスト(申し送り)**:Windows解析PCで `.env` に受け箱フォルダID・OAuth認証情報を設定し、受け箱の IMG_3355.MOV / IMG_3356.MOV で Issue #6 の8項目を確認する(音声抽出・派生物生成はT-102/T-104接続後)。検出精度は合否条件にしない
 
 ## 完了したこと
@@ -90,7 +91,7 @@
 
 ## 実行したテスト/テスト結果
 
-- `pytest`:63件すべてパス(環境確認7件+DB27件+メディア登録19件+Drive取込10件)
+- `pytest`:68件すべてパス(環境確認7件+DB27件+メディア登録19件+Drive取込15件)
 - DBテスト内訳:空DBへの最新スキーマ構築/1バージョンずつの段階的マイグレーション/再実行の冪等性/外部キー有効化・integrity_check/正確座標列の不存在検査/不透明IDポリシー/UTCヘルパー/FK違反拒否/一意制約/enum CHECK拒否/SED由来・種候補なしAudioDetection保存/統合後の生スコア保持/ReferenceObservation精査情報+二重確認CHECK/review追記専用/analysis_run完了後凍結/run_event・access_log追記専用/DetectionLink確定に人の記録必須
 - `bio-observer-envcheck`:すべてOK(Python 3.11.15 / ffmpeg 6.1.1 / ffprobe 6.1.1 / 設定読み込み)
 - ライブラリ比較:birdnet 0.2.16・birdnet-analyzer 2.4.0のインストール・API検証(詳細はD-22)。推論は未実施(T-103申し送り)
