@@ -24,6 +24,16 @@ AIは「候補」を提示するのみで、種・行動の確定は常に調査
 
 Claude Code・Codexは作業開始前に PROJECT_CHARTER.md・AI_HANDOFF.md・TASKS.md を確認すること。
 
+## データベース(T-004時点)
+
+SQLite+SQLファイル・マイグレーション(方式はDECISIONS.md D-23)。スキーマの正は [DATA_MODEL.md](DATA_MODEL.md)。
+
+```python
+from bio_observer.db import connect, migrate
+conn = connect("path/to/bio_observer.sqlite3")  # 外部キー制約を強制有効化
+migrate(conn)                                   # 未適用マイグレーションを適用
+```
+
 ## セットアップ(T-003時点)
 
 前提:Python 3.11、FFmpeg/FFprobe(6.x で確認済み)

@@ -21,7 +21,8 @@
 Project 1─* Site 1─* Station 1─* SurveySession 1─* MediaAsset 1─* AnalysisRun
 AnalysisRun 1─* VisualDetection / AudioDetection
 AnalysisRun 1─* JobStep / RunEvent(実行中状態・再開情報。Run本体は完了後凍結)
-AnalysisRun / Detection 1─* DerivedAsset(クリップ・WAV・スペクトログラム・サムネイル・軌跡画像・プロキシ)
+AnalysisRun 1─* DerivedAsset(クリップ・WAV・スペクトログラム・サムネイル・軌跡画像・プロキシ・プレビュー画像・レポート)
+DerivedAsset *─* Detection(DerivedAssetDetection 経由の多対多:1クリップに複数track、1trackが複数クリップ)
 VisualDetection / AudioDetection 1─* Review
 DetectionLink *─* (VisualDetection, AudioDetection)
 SurveySession 1─* ReferenceObservation(精査済み評価データ)
@@ -45,6 +46,7 @@ Export, AccessLog は横断系
 - site_id、名称、機材種別(カメラ/録音機/一体型)、機材モデル、設置位置(Siteからの相対でも可)、設置方向(方位・俯仰角)、画角、設置期間
 - 方向・画角の**変更履歴**(変更日時つき。変更時は新Stationレコードまたは履歴行として記録し、過去の検出との対応を保つ)
 - 既定の除外領域マスク(画角に紐づくため Station 単位で保持)
+- 既定の解析パラメータ(画角ごとに検出特性が大きく異なるため、Station単位の既定値を保持。実際に使った値は常に AnalysisRun のスナップショットが正)
 - 機器時刻オフセット(将来の複数機器同期用)
 
 ### 3.4 SurveySession(1回の調査)
@@ -54,8 +56,8 @@ Export, AccessLog は横断系
 
 ### 3.5 MediaAsset(元動画・元音声)
 - survey_session_id、種別(video/audio)、ファイルパス(設定基準の相対パス)、ハッシュ(SHA-256:改変検知)、コーデック、解像度、fps、サンプルレート、チャンネル、長さ、ファイル録画日時メタデータ
-- **撮影開始日時(確定値)**、確定根拠(メタデータ/人の入力/補正)、タイムゾーン
-- 原データは読み取り専用。レコードの削除は論理削除のみ
+- **撮影開始日時(確定値)**、算出根拠(埋め込みメタデータ/ファイル作成・更新時刻からの推定/人の入力/補正)、**確実性(確定/推定/不明)**、タイムゾーン
+- 原データは読み取り専用。**物理DELETEはDBが拒否し、削除は論理削除(deleted_at)のみ。原本同一性のsha256は登録後変更禁止(トリガーで拒否)。** relative_pathは保管先再編成時のみ変更可(ハッシュが同一性の根拠)
 
 ### 3.6 AnalysisRun(解析実行)
 - media_asset_id、解析種別(visual/audio)、状態(待機/実行中/完了/失敗/中断)
@@ -69,7 +71,9 @@ Export, AccessLog は横断系
 - 羽ばたきの有無・周期、飛行様式候補(滑翔/旋回/帆翔/波状飛行等)
 - 林内への出入り、止まり・飛び立ちの候補フラグ
 - 候補分類(鳥/虫/葉/雲/航空機/不明 等)、**猛禽類候補度**、種候補(複数、信頼度つき)、AI信頼度、判定根拠(どの特徴が寄与したか)
-- 派生物への参照:DerivedAsset(候補動画、サムネイル、軌跡画像。3.16)
+- **候補区分(positive/insurance)と区分理由**:Recall優先の保険的候補(Insurance)を通常候補と区別して保持する(判定閾値未満・境界マスク接触等の理由つき)
+- **生の特徴量**:主要検索項目(時刻・座標・方向・速度・大きさ・羽ばたき・候補分類・信頼度・候補区分)は固定列、Optical Flow統計等のその他の特徴量はスキーマバージョン付き構造化データ(features_json + feature_schema_version)として保持する(D-24)
+- 派生物への対応:DerivedAssetDetection 経由の多対多(3.19。1クリップに複数track、1trackが複数クリップにまたがる場合に対応)
 - 現在の確認状態(最新Reviewから導出。導出値であり原本はReview)
 
 ### 3.8 AudioDetection(音声検出)
@@ -79,13 +83,15 @@ Export, AccessLog は横断系
 - 不明音フラグ、繁殖関連音声の可能性(候補として)
 - 検出由来(音声イベント検出/種分類/両方。D-7。SED由来は種候補なしでも保存する)
 - **SEDと種分類の検出を統合した場合も、各モデルの生スコア・モデル版・判定根拠を統合前のまま保持する**(統合結果だけを残してはならない。再現可能性と閾値再調整のため)
-- 派生物への参照:DerivedAsset(音声クリップ、スペクトログラム。3.16)
+- 候補区分(positive/insurance)と区分理由(低信頼度の保険的保存。D-18)
+- 派生物への対応:DerivedAssetDetection 経由の多対多(3.19)
 - 現在の確認状態(最新Reviewから導出)
 
 ### 3.9 Review(人による確認)
 - 対象(visual_detection_id または audio_detection_id)、判定者、判定日時
 - 確認状態(SURVEY_METHOD.md 第3章の区分に厳密に従う)
-- 人による種判定(species_id、確定粒度:種/属/科/猛禽類/鳥類)、年齢・性別・個体識別の可否、individual_id(任意)
+- 人による種判定(species_id、確定粒度:種/属/科/猛禽類/鳥類、属・科の場合は分類群名 confirmed_taxon)、年齢・性別・個体識別の可否、individual_id(任意)
+- 確認状態と判定内容の整合はDB制約で強制する(許容組合せは SURVEY_METHOD.md 3.2.1)
 - 行動判定(behavior_id)、繁殖関連行動の判定
 - 判定根拠(自由記述+選択式)、備考
 - **追記のみ**。修正は新しいReview行として記録し、履歴を保持する
@@ -112,9 +118,9 @@ Export, AccessLog は横断系
 - 追記のみ・改変不可
 
 ### 3.16 DerivedAsset(派生物)
-- 種別(候補動画クリップ/抽出WAV/音声クリップ/スペクトログラム/サムネイル/軌跡画像/プロキシ 等)
-- 系譜:media_asset_id(元の原データ)、analysis_run_id(生成したRun)、detection_id(対応する検出。任意)
-- ファイルパス(設定基準の相対パス)、ハッシュ(SHA-256)、サイズ、形式
+- 種別(候補動画クリップ/抽出WAV/音声クリップ/スペクトログラム/サムネイル/軌跡画像/プロキシ/**プレビュー画像(マスク・閾値確認用)/レポート(集計CSV等)** 等)
+- 系譜:media_asset_id(元の原データ)、analysis_run_id(生成したRun)。**Runと元データの組合せ整合はトリガーで強制**(別動画のRunとの誤接続を拒否)。検出との対応は DerivedAssetDetection(3.19)で多対多に保持
+- ファイルパス(設定基準の相対パス)、ハッシュ(SHA-256。**実体が存在する状態=presentではハッシュ必須**、生成途中はregenerating等)、サイズ、形式
 - 生成条件(使用ツール・パラメータ:前後マージン、解像度、コーデック等のスナップショット)
 - 再生成可否フラグ、再生成状態(存在/削除済み・再生成可/再生成中/再生成失敗)
 - ディスク逼迫時は再生成可能な DerivedAsset のみ削除対象とできる(原データ・確認済み判定は削除しない)
@@ -131,6 +137,12 @@ Export, AccessLog は横断系
 - 現地野帳記録(SurveySession保持。速報的・粗い)とは別エンティティとする(D-11)
 - 用途:**ベンチマーク評価の正解データ**。検出率・見逃し率等の定量指標(SURVEY_METHOD.md 第5章)は ReferenceObservation に対して算出する
 - 野帳照合は見逃しスクリーニング(粗い突合)、ReferenceObservation照合は定量評価と役割を分ける
+
+### 3.19 DerivedAssetDetection(派生物と検出の対応)
+- derived_asset_id、対応する検出(visual_detection_id または audio_detection_id のどちらか一方)、役割(primary=その派生物の主対象/member=含まれる)
+- 動体Trackと抽出クリップの**多対多**関係を表す:1つのクリップに複数のtrackが含まれる、1つのtrackが複数のクリップにまたがる、の両方に対応
+- 同一の(派生物, 検出)組の重複登録は一意制約で拒否
+- **対応づける検出は、その派生物を生成したAnalysisRunの検出に限る**(別Runの検出との誤接続はトリガーで拒否。再現性の保護)
 
 ## 4. 状態遷移(検出候補の確認状態)
 

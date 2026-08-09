@@ -30,5 +30,8 @@ bio-observer-envcheck = "bio_observer.envcheck:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"bio_observer.db" = ["migrations/*.sql"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

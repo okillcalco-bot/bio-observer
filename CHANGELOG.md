@@ -1,5 +1,46 @@
 # 変更履歴(CHANGELOG.md)
 
+## 2026-08-09(T-005再レビュー指摘対応:系譜IDのイミュータブル化)
+
+- analysis_run.media_asset_id / visual_detection.analysis_run_id / audio_detection.analysis_run_id を作成後変更禁止に(トリガー。同値UPDATEは許可)。親側更新による系譜整合の迂回を防止(D-23追記)
+- 回帰テスト1件追加(全34件パス)
+
+## 2026-08-09(追加要件登録:Google Drive自動取込 T-110)
+
+- Google Drive受け箱による自動取込・結果返却を承認済み追加要件として登録(Issue #6、着手はT-101完了後・独立PR)
+- ROADMAP.md(承認済み追加要件の節を新設)、TASKS.md(T-110)、AI_HANDOFF.mdへ追記(設計文書への最小限の追記のみ。Drive API実装は未着手)
+
+## 2026-08-09(CodexレビューT-005指摘対応)
+
+- media_asset:物理DELETE拒否・sha256変更拒否トリガーを追加(原則3)。原本同一性フィールドの方針をD-23へ追記
+- 系譜整合トリガー:derived_assetのRun⇄メディア一致、derived_asset_detectionのRun一致を強制(誤接続の拒否)
+- review:確認状態と判定内容の整合CHECK(SURVEY_METHOD.md 3.2.1に許容組合せ表を新設)、confirmed_taxon列を追加。NULL安全なIS/COALESCEを使用
+- 時刻・範囲CHECK:検出・精査データ・撮影開始日時にUTC ISO-8601形式/開始≦終了/非負オフセット、Run・JobStep終端状態にfinished_at必須(failedはerror必須)。迂回防止方針をD-23へ記録
+- reference_observation:二重確認に第二精査者+精査日時の両方を必須化
+- derived_asset:present状態でsha256必須(推奨事項対応)
+- テスト5件追加(全33件パス)
+
+## 2026-08-09(先行成果品の分析に基づくT-004スキーマ補強。D-24/D-25)
+
+- 先行成果品(Google Drive参考資料:画角別解析結果・track_summary約35特徴量・config_used約70パラメータ・positive/insurance区分・人によるスクリーニング結果)を分析し、将来の映像解析結果を保存できるかを検証
+- DerivedAssetDetection(派生物⇄検出の多対多)を新設:1クリップ複数track/1track複数クリップに対応。DerivedAssetの単一検出FKは廃止
+- visual_detection / audio_detection に候補区分(positive/insurance)+区分理由を追加
+- media_asset に実時刻の確実性(confirmed/estimated/unknown)を追加、算出根拠にfile_timeを追加
+- station に既定解析パラメータ(default_analysis_params_json)を追加
+- derived_asset の種別に preview_image / report を追加
+- Track特徴量はハイブリッド方式に決定(主要検索項目=固定列、その他=feature_schema_version付きJSON。D-24)
+- DBテスト2件追加(全28件パス)。参考ファイル・動画はリポジトリへコピーしていない
+
+## 2026-08-09(T-004 DBスキーマ・マイグレーション基盤。Issue #4)
+
+- `bio_observer.db` 追加:DB接続(外部キー制約の強制有効化)、番号付きSQLマイグレーション基盤、schema_migrations管理(実装方式はD-23)
+- 初回マイグレーション 0001_initial:DATA_MODEL.md 3.1〜3.18の全19テーブル+FK・一意制約・CHECK enum・インデックス
+- 追記専用の担保:review/access_log/run_event のUPDATE/DELETE拒否トリガー、analysis_run の完了後凍結トリガー(D-1/D-10。限界はD-23に明記)
+- 不透明ID生成(`ids.new_id`、登録制プレフィックス)・UTC日時ヘルパー(D-6、naive拒否)
+- D-12遵守:正確な座標を保存する列は不存在(Siteは丸め表現+丸め粒度のみ。テストで列名検査)
+- DBテスト19件追加(全26件パス)
+- 解析機能・API・UIは未実装(T-101以降)
+
 ## 2026-08-09(PR #3 Codexレビュー対応)
 
 - THIRD_PARTY_LICENSES.md 新規作成。BirdNETのライセンス表記を修正(コード:MIT/学習済みモデル:CC BY-NC-SA 4.0。研究・技術検証前提、商用利用前の権利者確認を必須化)。D-22・READMEにも反映

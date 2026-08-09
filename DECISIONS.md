@@ -121,6 +121,46 @@ with birdnet.AcousticPredictionSession(model) as s:
 - **モデルの保存先・モデル形式・バージョン・SHA-256・オフライン再利用方法の確定**(モデルキャッシュを `BIO_OBSERVER_MODELS_DIR` 等の管理対象ディレクトリへ固定できるかの検証を含む。現時点でライブラリ既定の保存先は未確認)
 - 速度・精度に問題が出た場合は本決定を見直す(その場合も本エントリは上書きせず追記で改訂する)
 
+### D-23:DB実装方式(T-004)— 標準ライブラリsqlite3+SQLファイル・マイグレーション
+- 日付:2026-08-09/決定者:Claude Code(T-004)/Issue #4
+- **方式**:ORMを使わず、標準ライブラリ `sqlite3` + 番号付きSQLマイグレーションファイル(`src/bio_observer/db/migrations/NNNN_name.sql`)+ 小さなランナー(`bio_observer.db.migrate`)。適用履歴は `schema_migrations` テーブルで管理し、各マイグレーションは1トランザクションで適用する。
+- **代替案と不採用理由**:SQLAlchemy+Alembic(業界標準でPostgreSQL移行が滑らか)は、MVPの依存最小方針・スキーマの見通し(生SQLでレビュー可能)を優先して現時点では不採用。テーブル数がさらに増える・PostgreSQL移行が現実化した時点で再評価する(移行時はSQLファイルがそのままDDLの正となる)。
+- **外部キー**:接続ヘルパー `connect()` が `PRAGMA foreign_keys = ON` を必ず実行し、有効化を確認できなければ接続を拒否する。
+- **不透明ID**:`<エンティティ略号>_<uuid4hex>`(例:`site_3f2a…`)。略号は `ids.ID_PREFIXES` に登録制とし、表示名由来のプレフィックスを拒否する。パス・IDに地点名・希少種名を使わない(STORAGE.md)。
+- **日時**:UTCのISO-8601文字列(`YYYY-MM-DDTHH:MM:SSZ`)で保存(D-6)。naive datetimeはヘルパーが拒否する。
+- **enum**:TEXT+CHECK制約。判定区分はSURVEY_METHOD.md第3章のASCIIコード対応(例:`species_confirmed`)。
+- **座標**:正確な座標列は作らない(D-12)。Siteは丸め表現(`rounded_position`:メッシュコード・市区町村名等の文字列)+`rounding_level` のみ。数値の緯度経度列は丸め済みであっても現段階では設けない(テストで列名を検査)。
+- **追記専用の担保**:DBトリガーで実装。`review`/`access_log`/`run_event` はUPDATE/DELETEを常に拒否。`analysis_run` は終端状態(completed/failed/aborted)後のUPDATEと、状態を問わずDELETEを拒否(実行中の状態遷移・完了時の確定更新は許可。D-10)。
+  - **限界(明記)**:SQLiteのトリガーはDDL権限があれば削除可能であり、DBファイルへ直接アクセスできる利用者に対する完全な防御ではない。誤操作(アプリのバグ・手動SQL)への防御と位置づける。PostgreSQL移行時はロール権限(INSERT可・UPDATE/DELETE不可)での担保へ置き換える。
+- 反映:src/bio_observer/db/、tests/test_db_migrations.py、tests/test_db_constraints.py。
+
+**追記(2026-08-09、CodexレビューT-005対応)**
+- **原データの物理DELETE禁止**:media_asset はDELETE拒否トリガーで保護(削除は論理削除 deleted_at のみ)。**原本同一性フィールドの方針**:sha256 は登録後変更禁止(トリガーで拒否)。relative_path は保管先再編成時のみ変更可とする(同一性の根拠はハッシュであり、パスは可変)。その他のメタデータ列(コーデック・長さ等)は再取得での訂正を許容する。
+- **系譜整合の強制**:derived_asset の media_asset_id は analysis_run の media_asset_id と一致必須、derived_asset_detection が対応づける検出はその派生物を生成したRunの検出に限る(いずれもINSERT/UPDATEトリガーで拒否)。
+- **Review整合CHECK**:確認状態と判定内容の許容組合せをCHECK制約で強制(定義は SURVEY_METHOD.md 3.2.1)。属・科確認用に confirmed_taxon 列を追加。**SQLiteのCHECKはNULL評価で素通りするため、NULL安全な IS / COALESCE を使用する**(実装上の注意として明記)。
+- **時刻・範囲の整合CHECKの適用範囲**:共通タイムラインに直結する列(visual/audio_detection の開始・終了時刻とメディア内オフセット、reference_observation の時刻、media_asset.recording_started_at)にUTC ISO-8601形式(GLOB)・開始≦終了・非負オフセットのCHECKを付与。analysis_run/job_step の終端状態には finished_at 必須(failedはerrorも必須)。**迂回防止方針**:その他の時刻列(created_at等)はDB制約を課さず、書込は必ず `ids.utc_now_iso()`/`to_utc_iso()` ヘルパー経由とする(naive拒否)。生SQLでの直接書込はテスト・マイグレーションを除き禁止し、コードレビューで担保する。将来書込APIを実装する際(T-101以降)、時刻列への書込をヘルパーへ一元化する。
+- **DerivedAssetのsha256**:regeneration_state='present'(実体が存在)ではsha256必須(CHECK)。NULLを許すのは生成途中(regenerating)・削除済み(deleted_regenerable)・生成失敗のみ。
+- **Run/Detectionの系譜IDは作成後変更禁止**(T-005再レビュー指摘対応):`analysis_run.media_asset_id`、`visual_detection.analysis_run_id`、`audio_detection.analysis_run_id` は作成後イミュータブル(トリガーで変更拒否。同値UPDATEは許可)。関連付け後に親側のIDを差し替えて系譜整合トリガーを迂回する抜け道を塞ぐ。
+
+### D-24:Track特徴量はハイブリッド方式(主要検索項目=固定列、その他=バージョン付き構造化データ)
+- 日付:2026-08-09/決定者:Claude Code(T-004。先行成果品の分析に基づく)/Issue #4
+- 背景:先行成果品(Google Drive参考資料)のtrack_summary.csvは1トラック約35列の特徴量(直進性、面積変化率、Flow magnitude統計、動的Flow閾値、境界接触率、局所コントラスト等)を持ち、これらは手法改善に伴い**増減することが確実**。
+- 決定:**すべてを固定列にしない。** 主要検索項目(開始・終了時刻、座標、移動方向、速度、見かけの大きさ、羽ばたき、候補分類、猛禽類候補度、AI信頼度、候補区分)のみ visual_detection の固定列とし、その他の生特徴量は `features_json` に **`feature_schema_version` を付けて**構造化データとして保持する。
+- 代替案と不採用理由:(a) 全固定列=特徴量の追加・変更のたびにマイグレーションが必要でRun間の比較も崩れる。(b) EAV(縦持ち)=クエリが複雑化し型安全性も低い。ハイブリッドは検索性能(固定列+インデックス)と拡張性を両立する。
+- 運用:feature_schema_version はAnalysisRunのモデル版・パラメータとともに記録され、版が異なるRun間の特徴量比較は同版内でのみ行う。頻繁に検索する特徴量が固定した段階で列へ昇格させる(昇格は新マイグレーションで行い、features_json側も残す)。
+
+### D-25:先行成果品の分析に基づくスキーマ補強(T-004)
+- 日付:2026-08-09/決定者:Claude Code(T-004)/Issue #4
+- 背景:先行成果品(画角別解析結果・約70パラメータのconfig_used・positive/insurance区分・クリップ⇄トラック対応・ファイル時刻由来の実時刻推定・人によるスクリーニング結果)を、原則(コピーではなくCHARTER/DATA_MODEL/SECURITY優先)に照らして取り込んだ。
+- 決定内容:
+  1. **DerivedAssetDetection(多対多)を新設**:動体Trackと抽出クリップの多対多関係(1クリップ複数track/1track複数クリップ)に対応。DerivedAssetの単一検出FKは廃止
+  2. **候補区分(candidate_tier: positive/insurance)+区分理由**を visual_detection / audio_detection に追加(Recall優先の保険的候補を明示的に管理。原則2/D-18)
+  3. **実時刻の確実性**:media_asset に recording_start_certainty(confirmed/estimated/unknown)を追加し、算出根拠enumへ file_time(ファイル作成・更新時刻からの推定)を追加
+  4. **Station既定解析パラメータ**(default_analysis_params_json)を追加:画角ごとに検出特性・マスク・閾値が大きく異なるため。実際に使った値は常にAnalysisRunのスナップショットが正
+  5. **DerivedAsset種別に preview_image(マスク・閾値プレビュー)と report(集計CSV等)を追加**:先行成果品のプレビューJPG・サマリCSV相当を派生物として系譜管理する
+- 先行成果品から**採用しなかった**点:表示名ベースのファイル名・フォルダ名(不透明ID方式を維持。STORAGE.md)、クリップ単位のみの人判定(本設計は検出単位のReviewを正とし、クリップはDerivedAssetとして対応付ける)、CSV上での判定と候補の混在(AI候補とReviewの分離を維持。D-1)
+- 参考資料の扱い:Google Drive上の参照のみ。ファイル・動画はリポジトリへコピーしない
+
 ---
 
 ## 旧・判断待ち事項の決定(P-1〜P-8 → D-14〜D-21)
