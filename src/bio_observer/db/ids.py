@@ -33,6 +33,8 @@ ID_PREFIXES = frozenset({
     "step",  # job_step
     "evt",   # run_event
     "ref",   # reference_observation
+    "ijob",  # ingest_job
+    "ievt",  # ingest_event
 })
 
 _PREFIX_PATTERN = re.compile(r"^[a-z][a-z0-9]{1,7}$")

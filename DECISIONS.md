@@ -176,6 +176,25 @@ with birdnet.AcousticPredictionSession(model) as s:
 - **確定後の後処理も完全ロールバック**:`os.link` 成功後の一時ファイル削除に失敗した場合、自分が作成した確定ファイル(リンク)を取り消して例外を再送出する。「DB行のない確定ファイル」が残る経路を塞ぐ。フォールバックのコピー途中失敗も、自分が排他的に作成した確定ファイルのみ削除して再送出する。
 - **トランザクション契約の明文化**:`register_media` は接続のトランザクション所有者として振る舞い、成功時 `conn.commit()`/失敗時 `conn.rollback()` を接続全体へ発行する。呼び出し側の未確定変更と同一トランザクションで合成しないこと。将来、取込ワーカー(T-110)等で他のDB操作と合成する必要が生じた場合はSAVEPOINTによる局所トランザクション化を検討する(非ブロッキング申し送り)。
 
+### D-27:Google Drive自動取込の設計(T-110)
+- 日付:2026-08-09/決定者:Claude Code(T-110)/Issue #6
+- **取込状態は専用エンティティで管理**:IngestJob(状態機械)+IngestEvent(追記専用の遷移ログ)を新設(マイグレーション0002、DATA_MODEL.md 3.20/3.21)。解析実行のJobStep/RunEventとは分離する(取込は解析Runの前段であり、RunEventはanalysis_runに紐づくため)。状態変化は上書きに加えて必ずIngestEventへ追記する。
+- **アップロード完了判定**:Drive APIのサイズ・modifiedTimeを**連続N回(既定2回)の確認で不変**のときに完了とみなす(4時間動画の途中取得防止)。観測履歴はstable_probe_jsonに保持。
+- **安全なダウンロード**:一時領域(`<DATA_ROOT>/ingest_tmp`)へ `.part` 拡張子でチャンクDL→取得サイズをDriveメタデータと検証→一時領域内の確定名へ移動。originals/への最終確定と原本保護はregister_media(D-26)が担う。DL済み一時ファイルは登録成功後に削除する(原本はoriginals/とDrive上に存在)。空き容量はDL前に確認。
+- **二重解析防止の二段構え**:同じDrive File IDはUNIQUE制約で再取込しない。別File IDでも同一SHA-256ならregister_mediaのDuplicateMediaErrorを捕捉し、duplicate_of_media_asset_id を記録して完了(新規登録なし)。重複ジョブにも結果(status.json)は返却する。
+- **結果返却**:入力フォルダ直下を汚さず `results/<job_id>/` へ status.json・summary.csv を返却(将来のクリップ・スペクトログラム等はvideo_clips/等のサブフォルダへ追加)。Drive上のフォルダ名はjob id(不透明ID)であり表示名と混同しない。座標・希少種名・地点名は含めない。
+- **再開性**:状態はDBが正。ワーカーの process_pending() は未完了ジョブを状態から続行できる(PC再起動対応)。失敗時は retry_required(復帰先resume_status保持)→上限(既定3回)超過で failed。
+- **解析パイプラインの差込点**:analysis_hook(未指定ならスキップ)として分離。T-102以降のパイプライン実装後に接続する。Issue #6のE2Eスモークテストのうち音声抽出・派生物生成はT-102/T-104接続後に検証する(初回スモークは取込・系譜・再現性・結果返却まで。検出精度は合否条件外)。
+- **Drive操作の制約**:元動画に対しては読み取りのみ(削除・移動・改名のAPIを実装しない)。書き込みはresults配下の作成・アップロードのみ。
+- **実装方式**:ワーカーはDriveClientプロトコルに依存し、自動テストはフェイク実装で全状態遷移を検証(実Drive APIはネットワーク・OAuth必須のため)。実運用実装はgoogle-api-python-client 2.198.0/google-auth 2.56.3/google-auth-oauthlib 1.4.0(optional-dependencies `drive` にピン留め)。OAuth認証情報・トークン・フォルダIDは環境変数でGit管理外のパス・値を指定(SECURITY.md)。
+- **実機E2Eスモークテスト**:Windows解析PC上で受け箱の短尺2本(IMG_3355/3356.MOV)を用いて実施する(AI_HANDOFF.md申し送り)。
+
+**追記(2026-08-09、T-110レビュー対応)**
+- **完了判定に最小時間間隔を導入**:連続確認は `stability_interval_seconds`(既定60秒)以上の実時間を空けた観測のみ数える。間隔不足の観測は確認回数・基準時刻を進めない(ワーカーを連続実行しても数秒で2回確認扱いにならず、4時間動画の途中取得を防ぐ)。
+- **登録失敗時はDL済みファイルを保持**:一時DLファイルを削除するのは登録に決着した場合(登録成功/重複確定)のみ。一時的な登録失敗では保持したまま再試行し、「ファイルがない」で詰まらない。downloaded状態でファイルが消えていた場合も、エラーにせず再取得(downloading)へ戻して続行する。
+- **重複ジョブの完了は結果返却後**:同一ハッシュ検出時は completed へ直行せず uploading_results へ遷移する。結果返却前にクラッシュしても、再開時に処理対象として残り、必ず結果が返る。
+- **結果返却の冪等性**:DriveClient.upload_file の契約を「同名があれば置換」とする(GoogleDriveClientはname一致のfiles().update、フェイクも同契約)。同じジョブの再試行で status.json 等が増殖しない。
+
 ---
 
 ## 旧・判断待ち事項の決定(P-1〜P-8 → D-14〜D-21)
