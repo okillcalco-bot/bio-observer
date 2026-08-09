@@ -134,6 +134,25 @@ with birdnet.AcousticPredictionSession(model) as s:
   - **限界(明記)**:SQLiteのトリガーはDDL権限があれば削除可能であり、DBファイルへ直接アクセスできる利用者に対する完全な防御ではない。誤操作(アプリのバグ・手動SQL)への防御と位置づける。PostgreSQL移行時はロール権限(INSERT可・UPDATE/DELETE不可)での担保へ置き換える。
 - 反映:src/bio_observer/db/、tests/test_db_migrations.py、tests/test_db_constraints.py。
 
+### D-24:Track特徴量はハイブリッド方式(主要検索項目=固定列、その他=バージョン付き構造化データ)
+- 日付:2026-08-09/決定者:Claude Code(T-004。先行成果品の分析に基づく)/Issue #4
+- 背景:先行成果品(Google Drive参考資料)のtrack_summary.csvは1トラック約35列の特徴量(直進性、面積変化率、Flow magnitude統計、動的Flow閾値、境界接触率、局所コントラスト等)を持ち、これらは手法改善に伴い**増減することが確実**。
+- 決定:**すべてを固定列にしない。** 主要検索項目(開始・終了時刻、座標、移動方向、速度、見かけの大きさ、羽ばたき、候補分類、猛禽類候補度、AI信頼度、候補区分)のみ visual_detection の固定列とし、その他の生特徴量は `features_json` に **`feature_schema_version` を付けて**構造化データとして保持する。
+- 代替案と不採用理由:(a) 全固定列=特徴量の追加・変更のたびにマイグレーションが必要でRun間の比較も崩れる。(b) EAV(縦持ち)=クエリが複雑化し型安全性も低い。ハイブリッドは検索性能(固定列+インデックス)と拡張性を両立する。
+- 運用:feature_schema_version はAnalysisRunのモデル版・パラメータとともに記録され、版が異なるRun間の特徴量比較は同版内でのみ行う。頻繁に検索する特徴量が固定した段階で列へ昇格させる(昇格は新マイグレーションで行い、features_json側も残す)。
+
+### D-25:先行成果品の分析に基づくスキーマ補強(T-004)
+- 日付:2026-08-09/決定者:Claude Code(T-004)/Issue #4
+- 背景:先行成果品(画角別解析結果・約70パラメータのconfig_used・positive/insurance区分・クリップ⇄トラック対応・ファイル時刻由来の実時刻推定・人によるスクリーニング結果)を、原則(コピーではなくCHARTER/DATA_MODEL/SECURITY優先)に照らして取り込んだ。
+- 決定内容:
+  1. **DerivedAssetDetection(多対多)を新設**:動体Trackと抽出クリップの多対多関係(1クリップ複数track/1track複数クリップ)に対応。DerivedAssetの単一検出FKは廃止
+  2. **候補区分(candidate_tier: positive/insurance)+区分理由**を visual_detection / audio_detection に追加(Recall優先の保険的候補を明示的に管理。原則2/D-18)
+  3. **実時刻の確実性**:media_asset に recording_start_certainty(confirmed/estimated/unknown)を追加し、算出根拠enumへ file_time(ファイル作成・更新時刻からの推定)を追加
+  4. **Station既定解析パラメータ**(default_analysis_params_json)を追加:画角ごとに検出特性・マスク・閾値が大きく異なるため。実際に使った値は常にAnalysisRunのスナップショットが正
+  5. **DerivedAsset種別に preview_image(マスク・閾値プレビュー)と report(集計CSV等)を追加**:先行成果品のプレビューJPG・サマリCSV相当を派生物として系譜管理する
+- 先行成果品から**採用しなかった**点:表示名ベースのファイル名・フォルダ名(不透明ID方式を維持。STORAGE.md)、クリップ単位のみの人判定(本設計は検出単位のReviewを正とし、クリップはDerivedAssetとして対応付ける)、CSV上での判定と候補の混在(AI候補とReviewの分離を維持。D-1)
+- 参考資料の扱い:Google Drive上の参照のみ。ファイル・動画はリポジトリへコピーしない
+
 ---
 
 ## 旧・判断待ち事項の決定(P-1〜P-8 → D-14〜D-21)

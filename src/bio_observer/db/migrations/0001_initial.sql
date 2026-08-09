@@ -56,6 +56,8 @@ CREATE TABLE station (
     -- 設置方向・画角の変更時は新レコードを作り、前身をリンクする(DATA_MODEL.md 3.3)
     predecessor_station_id TEXT REFERENCES station(id),
     default_mask_json TEXT,
+    -- 画角・Stationごとの既定解析パラメータ(Runには常にスナップショットを別途保存)
+    default_analysis_params_json TEXT,
     clock_offset_seconds REAL NOT NULL DEFAULT 0,
     note TEXT,
     created_at TEXT NOT NULL,
@@ -138,8 +140,12 @@ CREATE TABLE media_asset (
     metadata_recorded_at TEXT,
     -- 撮影開始日時(確定値, UTC)= 共通タイムラインの基準
     recording_started_at TEXT,
+    -- 算出根拠:埋め込みメタデータ/ファイル作成・更新時刻からの推定/人の入力/補正
     recording_start_basis TEXT
-        CHECK (recording_start_basis IS NULL OR recording_start_basis IN ('metadata', 'manual', 'corrected')),
+        CHECK (recording_start_basis IS NULL OR recording_start_basis IN ('metadata', 'file_time', 'manual', 'corrected')),
+    -- 実時刻の確実性(確定/推定/不明)
+    recording_start_certainty TEXT
+        CHECK (recording_start_certainty IS NULL OR recording_start_certainty IN ('confirmed', 'estimated', 'unknown')),
     timezone TEXT,
     -- 原データは物理削除しない。論理削除のみ
     deleted_at TEXT,
@@ -256,6 +262,14 @@ CREATE TABLE visual_detection (
     raptor_likelihood REAL,
     species_candidates_json TEXT,
     ai_confidence REAL,
+    -- Positive候補とInsurance候補(Recall優先の保険的候補)の区別と、その判定理由
+    candidate_tier TEXT NOT NULL DEFAULT 'positive'
+        CHECK (candidate_tier IN ('positive', 'insurance')),
+    tier_reasons_json TEXT,
+    -- 生の特徴量(Optical Flow統計等)。主要検索項目は上の固定列、
+    -- 残りはバージョン付き構造化データとして保持する(D-24)
+    features_json TEXT,
+    feature_schema_version TEXT,
     -- 各モデルの生スコア・モデル名/版・判定根拠(DATA_MODEL.md 3.8 と同趣旨)
     raw_model_outputs_json TEXT NOT NULL DEFAULT '[]',
     note TEXT,
@@ -281,6 +295,10 @@ CREATE TABLE audio_detection (
     simultaneous_species_json TEXT,
     is_unknown_sound INTEGER NOT NULL DEFAULT 0 CHECK (is_unknown_sound IN (0, 1)),
     breeding_related_possibility TEXT,
+    -- Positive候補とInsurance候補(低信頼度の保険的保存。D-18)の区別
+    candidate_tier TEXT NOT NULL DEFAULT 'positive'
+        CHECK (candidate_tier IN ('positive', 'insurance')),
+    tier_reasons_json TEXT,
     -- 統合(merged)後も SED / 分類それぞれの生スコア・モデル名/版・根拠を保持する
     -- (代表スコア top_confidence だけで置き換えない。DATA_MODEL.md 3.8)
     raw_model_outputs_json TEXT NOT NULL,
@@ -363,11 +381,10 @@ CREATE TABLE derived_asset (
     id TEXT PRIMARY KEY,
     asset_type TEXT NOT NULL CHECK (asset_type IN (
         'proxy', 'extracted_audio', 'audio_clip', 'video_clip',
-        'spectrogram', 'thumbnail', 'trajectory_image', 'other')),
+        'spectrogram', 'thumbnail', 'trajectory_image',
+        'preview_image', 'report', 'other')),
     media_asset_id TEXT NOT NULL REFERENCES media_asset(id),
     analysis_run_id TEXT NOT NULL REFERENCES analysis_run(id),
-    visual_detection_id TEXT REFERENCES visual_detection(id),
-    audio_detection_id TEXT REFERENCES audio_detection(id),
     relative_path TEXT NOT NULL UNIQUE,
     sha256 TEXT,
     size_bytes INTEGER,
@@ -382,8 +399,24 @@ CREATE TABLE derived_asset (
 );
 CREATE INDEX idx_derived_asset_media ON derived_asset(media_asset_id);
 CREATE INDEX idx_derived_asset_run ON derived_asset(analysis_run_id);
-CREATE INDEX idx_derived_asset_visual ON derived_asset(visual_detection_id);
-CREATE INDEX idx_derived_asset_audio ON derived_asset(audio_detection_id);
+
+-- 派生物と検出の対応(多対多)。1クリップに複数track、1trackが複数クリップに
+-- またがる場合に対応する。role='primary' はその派生物の主対象(任意)
+CREATE TABLE derived_asset_detection (
+    id TEXT PRIMARY KEY,
+    derived_asset_id TEXT NOT NULL REFERENCES derived_asset(id),
+    visual_detection_id TEXT REFERENCES visual_detection(id),
+    audio_detection_id TEXT REFERENCES audio_detection(id),
+    role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('primary', 'member')),
+    created_at TEXT NOT NULL,
+    CHECK ((visual_detection_id IS NULL) <> (audio_detection_id IS NULL))
+);
+CREATE UNIQUE INDEX uq_dad_visual ON derived_asset_detection(derived_asset_id, visual_detection_id)
+    WHERE visual_detection_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_dad_audio ON derived_asset_detection(derived_asset_id, audio_detection_id)
+    WHERE audio_detection_id IS NOT NULL;
+CREATE INDEX idx_dad_visual ON derived_asset_detection(visual_detection_id);
+CREATE INDEX idx_dad_audio ON derived_asset_detection(audio_detection_id);
 
 -- ============ 精査済み評価データ(D-11) ============
 

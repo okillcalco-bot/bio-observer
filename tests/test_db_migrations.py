@@ -10,8 +10,8 @@ EXPECTED_TABLES = {
     "analysis_run", "job_step", "run_event",
     "visual_detection", "audio_detection", "review",
     "species", "individual", "behavior",
-    "detection_link", "derived_asset", "reference_observation",
-    "export", "access_log",
+    "detection_link", "derived_asset", "derived_asset_detection",
+    "reference_observation", "export", "access_log",
 }
 
 

@@ -159,6 +159,61 @@ def test_run_event_and_access_log_append_only(db, seed):
             db.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
 
 
+def test_track_clip_many_to_many(db, seed):
+    """動体Trackと抽出クリップの多対多対応(derived_asset_detection)。"""
+    track1 = insert(db, "visual_detection", id=new_id("vdet"), analysis_run_id=seed["run"],
+                    started_at="2026-08-01T04:00:00Z", ended_at="2026-08-01T04:00:10Z",
+                    media_start_offset_s=0, media_end_offset_s=10,
+                    candidate_tier="positive")
+    track2 = insert(db, "visual_detection", id=new_id("vdet"), analysis_run_id=seed["run"],
+                    started_at="2026-08-01T04:00:05Z", ended_at="2026-08-01T04:00:20Z",
+                    media_start_offset_s=5, media_end_offset_s=20,
+                    candidate_tier="insurance",
+                    tier_reasons_json='["below_dynamic_flow_threshold","no_strong_flow"]',
+                    features_json='{"straightness": 0.42, "frame_flow_mag_p90": 1.3}',
+                    feature_schema_version="v1")
+    clip1 = insert(db, "derived_asset", id=new_id("dast"), asset_type="video_clip",
+                   media_asset_id=seed["media"], analysis_run_id=seed["run"],
+                   relative_path="derived/clips/clip_0001.mp4")
+    clip2 = insert(db, "derived_asset", id=new_id("dast"), asset_type="video_clip",
+                   media_asset_id=seed["media"], analysis_run_id=seed["run"],
+                   relative_path="derived/clips/clip_0002.mp4")
+    # クリップ1に2トラック、トラック2は2クリップにまたがる
+    insert(db, "derived_asset_detection", id=new_id("dmem"),
+           derived_asset_id=clip1, visual_detection_id=track1, role="primary")
+    insert(db, "derived_asset_detection", id=new_id("dmem"),
+           derived_asset_id=clip1, visual_detection_id=track2)
+    insert(db, "derived_asset_detection", id=new_id("dmem"),
+           derived_asset_id=clip2, visual_detection_id=track2)
+    (n_clip1,) = db.execute(
+        "SELECT COUNT(*) FROM derived_asset_detection WHERE derived_asset_id = ?",
+        (clip1,)).fetchone()
+    (n_track2,) = db.execute(
+        "SELECT COUNT(*) FROM derived_asset_detection WHERE visual_detection_id = ?",
+        (track2,)).fetchone()
+    assert (n_clip1, n_track2) == (2, 2)
+    # 同一組の二重登録は拒否
+    with pytest.raises(sqlite3.IntegrityError):
+        insert(db, "derived_asset_detection", id=new_id("dmem"),
+               derived_asset_id=clip1, visual_detection_id=track1)
+
+
+def test_candidate_tier_and_recording_certainty(db, seed):
+    """Positive/Insurance区分のenumと、実時刻の算出根拠・確実性の保存。"""
+    with pytest.raises(sqlite3.IntegrityError):
+        insert(db, "visual_detection", id=new_id("vdet"), analysis_run_id=seed["run"],
+               started_at="2026-08-01T05:00:00Z", ended_at="2026-08-01T05:00:01Z",
+               media_start_offset_s=0, media_end_offset_s=1, candidate_tier="maybe")
+    med = insert(db, "media_asset", id=new_id("med"), survey_session_id=seed["session"],
+                 media_type="video", relative_path="x/video2.mp4", sha256="2" * 64,
+                 recording_started_at="2026-08-01T01:00:00Z",
+                 recording_start_basis="file_time",
+                 recording_start_certainty="estimated", timezone="Asia/Tokyo")
+    row = db.execute("SELECT recording_start_basis, recording_start_certainty "
+                     "FROM media_asset WHERE id = ?", (med,)).fetchone()
+    assert tuple(row) == ("file_time", "estimated")
+
+
 def test_detection_link_confirmation_requires_human_fields(db, seed):
     det_a = insert(db, "audio_detection", id=new_id("adet"), analysis_run_id=seed["run"],
                    started_at="2026-08-01T03:00:00Z", ended_at="2026-08-01T03:00:03Z",

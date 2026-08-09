@@ -29,6 +29,7 @@ ID_PREFIXES = frozenset({
     "exp",   # export
     "alog",  # access_log
     "dast",  # derived_asset
+    "dmem",  # derived_asset_detection
     "step",  # job_step
     "evt",   # run_event
     "ref",   # reference_observation

@@ -23,11 +23,15 @@
   - 環境確認テスト7件(tests/test_environment.py)+ `bio-observer-envcheck` CLI
 - T-004 DBスキーマ・マイグレーション基盤(Issue #4。実装方式はD-23):
   - `bio_observer.db`:接続(外部キー強制有効化)・番号付きSQLマイグレーション・schema_migrations管理
-  - 初回マイグレーション 0001_initial:DATA_MODEL.md 3.1〜3.18の全19テーブル+インデックス+トリガー
+  - 初回マイグレーション 0001_initial:DATA_MODEL.md 3.1〜3.19の全20テーブル+インデックス+トリガー
   - 追記専用の担保:review/access_log/run_event はUPDATE/DELETE拒否、analysis_runは完了後凍結(トリガー。限界はD-23に明記)
   - 不透明ID(`ids.new_id`、登録制プレフィックス)・UTC日時ヘルパー(naive拒否)
   - 正確な座標列は不存在(D-12。テストで列名検査)
-  - DBテスト19件(空DB構築/段階的アップグレード/冪等性/FK・一意・enum違反/SED由来種候補なし保存/生スコア保持/精査情報/追記専用/確定に人の記録必須)
+  - DBテスト21件(空DB構築/段階的アップグレード/冪等性/FK・一意・enum違反/SED由来種候補なし保存/生スコア保持/精査情報/追記専用/確定に人の記録必須/Track⇄クリップ多対多/候補区分・実時刻確実性)
+- 先行成果品(Google Drive参考資料)の分析とスキーマ反映(D-24/D-25):
+  - Track⇄クリップの多対多(DerivedAssetDetection)、positive/insurance候補区分+理由、実時刻の算出根拠(file_time追加)と確実性、Station既定解析パラメータ、DerivedAsset種別にpreview_image/report追加
+  - Track特徴量はハイブリッド方式(主要項目=固定列、その他=feature_schema_version付きJSON。D-24)
+  - 参考ファイル・動画はリポジトリへコピーしていない(Drive参照のみ)
 
 ## 未完了のこと
 
