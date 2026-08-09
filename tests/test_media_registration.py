@@ -180,7 +180,7 @@ def test_confirmed_certainty_requires_human_basis(db, seed, storage, sample_vide
 
 def test_cleanup_when_finalize_fails(db, seed, storage, sample_video, monkeypatch):
     """確定処理失敗時にDB行・一時ファイル・確定ファイルを残さない。"""
-    def boom(part, final):
+    def boom(*args):
         raise OSError("simulated finalize failure")
     monkeypatch.setattr(media_registry, "_finalize_exclusive", boom)
     sha = compute_sha256(sample_video)
@@ -321,6 +321,47 @@ def test_fallback_never_overwrites_existing_final(
         register_media(db, sample_video, seed["session"], storage=storage)
     assert dest.read_bytes() == sentinel
     assert [p for p in _leftover_files(storage) if p != dest] == []
+
+
+def test_fallback_copy_corruption_fully_rolled_back(
+        db, seed, storage, sample_video, monkeypatch):
+    """フォールバックコピーが破損した場合、final読み戻し照合で検知し完全に取り消す。"""
+    _force_link_unsupported(monkeypatch)
+
+    class TruncatingWriter:
+        """書込みを途中で打ち切り、コピー破損(サイズ・ハッシュ不一致)を注入する。"""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def write(self, data):
+            return self._inner.write(data[: max(1, len(data) // 2)])
+
+        def flush(self):
+            self._inner.flush()
+
+        def fileno(self):
+            return self._inner.fileno()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+    real_fdopen = media_registry.os.fdopen
+
+    def corrupting_fdopen(fd, mode="r", *args, **kwargs):
+        return TruncatingWriter(real_fdopen(fd, mode, *args, **kwargs))
+
+    monkeypatch.setattr(media_registry.os, "fdopen", corrupting_fdopen)
+    sha = compute_sha256(sample_video)
+    with pytest.raises(CopyVerificationError):
+        register_media(db, sample_video, seed["session"], storage=storage)
+    (count,) = db.execute("SELECT COUNT(*) FROM media_asset WHERE sha256 = ?",
+                          (sha,)).fetchone()
+    assert count == 0          # DB行なし
+    assert _leftover_files(storage) == []  # final・.part とも残らない
 
 
 def test_link_failure_with_other_errno_does_not_fall_back(

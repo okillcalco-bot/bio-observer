@@ -175,11 +175,13 @@ def _discard_part(part: Path) -> None:
     part.unlink()
 
 
-def _exclusive_copy(part: Path, final: Path) -> None:
-    """O_EXCLで確定名を排他的に作成し、一時ファイルの内容をコピーする。
+def _exclusive_copy(part: Path, final: Path,
+                    expected_sha256: str, expected_size: int) -> None:
+    """O_EXCLで確定名を排他的に作成し、一時ファイルの内容をコピー・照合する。
 
-    既存ファイルがあれば FileExistsError(上書きは構造的に不可能)。コピー途中で
-    失敗した場合、自分が排他的に作成した確定ファイルのみ削除して再送出する。
+    既存ファイルがあれば FileExistsError(上書きは構造的に不可能)。コピー後に
+    finalを読み戻してSHA-256・サイズを期待値と照合し、不一致(コピー破損)や
+    途中失敗の場合は、自分が排他的に作成した確定ファイルのみ削除して再送出する。
     """
     fd = os.open(final, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     try:
@@ -188,18 +190,27 @@ def _exclusive_copy(part: Path, final: Path) -> None:
                 dst.write(chunk)
             dst.flush()
             os.fsync(dst.fileno())
+        # finalを読み戻して照合(DBのハッシュと実ファイルの食い違いを防ぐ)
+        if (compute_sha256(final) != expected_sha256
+                or final.stat().st_size != expected_size):
+            raise CopyVerificationError(
+                "フォールバックコピー後の確定ファイルがハッシュ・サイズ照合で不一致")
     except BaseException:
         final.unlink(missing_ok=True)
         raise
 
 
-def _finalize_exclusive(part: Path, final: Path) -> None:
+def _finalize_exclusive(part: Path, final: Path,
+                        expected_sha256: str, expected_size: int) -> None:
     """一時ファイルを確定パスへ、既存ファイルを上書きせず排他的に確定する。
 
     - 第一手段:同一ディレクトリ内の os.link による確定名の排他的作成
-      (既存があれば FileExistsError となり、既存ファイルは変更されない)
+      (既存があれば FileExistsError となり、既存ファイルは変更されない)。
+      linkは検証済み .part と同一inodeを指すため再照合は不要
     - ハードリンク非対応FS(exFAT等。errnoで判別):O_EXCL による排他的作成+
-      コピーへフォールバックする。どの経路でも既存ファイルの上書きは起こらない
+      コピーへフォールバックし、**finalを読み戻してSHA-256・サイズを照合**する。
+      どの経路でも既存ファイルの上書きは起こらず、DBのハッシュと実ファイルが
+      食い違う状態も残らない
     - 確定後の一時ファイル削除に失敗した場合は、自分が作成した確定ファイルを
       取り消して(削除して)例外を再送出する=後処理失敗も完全ロールバック(D-26)
     """
@@ -212,7 +223,7 @@ def _finalize_exclusive(part: Path, final: Path) -> None:
         if exc.errno not in _LINK_UNSUPPORTED_ERRNOS:
             raise
         try:
-            _exclusive_copy(part, final)
+            _exclusive_copy(part, final, expected_sha256, expected_size)
         except FileExistsError:
             raise PathCollisionError(
                 f"確定先が既に存在します(既存ファイルは変更しません): {final.name}")
@@ -338,7 +349,7 @@ def register_media(
              recording_start_basis, recording_start_certainty,
              tz or storage.tz, note, now, now),
         )
-        _finalize_exclusive(dest_part, dest_final)  # 既存を上書きしない原子的確定
+        _finalize_exclusive(dest_part, dest_final, sha256, source_size)  # 排他的確定
         finalized = True
         conn.commit()
     except BaseException:
