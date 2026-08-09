@@ -12,7 +12,7 @@
 |---|---|---|---|---|
 | T-001 | 設計ドキュメント作成 | 憲章・データモデル・調査方法・セキュリティ等の初版 | Fable | 完了 |
 | T-002 | 設計レビュー | 実装観点での整合性確認。指摘10件はD-7〜D-21として反映し、再レビューで承認(重大な矛盾なし・実装開始可) | Codex | 完了 |
-| T-003 | リポジトリ初期化 | Python環境、ディレクトリ構成、設定ファイルテンプレート(.env.example)、.gitignore(動画・モデル・秘密情報除外)。**音声ライブラリ比較決定(公式 birdnet Python library vs BirdNET-Analyzer。D-13)を含む** | Claude Code | 未着手 |
+| T-003 | リポジトリ初期化 | Python環境、ディレクトリ構成(STORAGE.md)、.env.example、.gitignore(動画・モデル・座標・秘密情報除外)、環境確認テスト。音声ライブラリ比較の結果、公式 birdnet 0.2.16 を採用(D-22。推論スモークテストはM1着手時にローカル解析機で実施) | Claude Code | 完了(Issue #2) |
 | T-004 | DBスキーマ実装 | DATA_MODEL.md 準拠のSQLiteスキーマ+マイグレーション(DerivedAsset・JobStep/RunEvent・ReferenceObservation含む。D-9/D-10/D-11。正確座標カラムは設けない。D-12) | Claude Code | 未着手 |
 | T-005 | スキーマレビュー | DATA_MODEL.md との突合、追記性・移行性の確認 | Codex | 未着手 |
 

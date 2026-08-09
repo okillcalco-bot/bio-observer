@@ -76,6 +76,51 @@
 - 理由:birdnetlibはサードパーティ製であり、公式ラインの保守状況を確認した上で選定すべきため。
 - 反映:ARCHITECTURE.md 第2・4・8章、TASKS.md T-003。
 
+### D-22:音声解析ライブラリは公式 birdnet Python library を採用する(T-003比較検証の結果)
+- 日付:2026-08-09/決定者:Claude Code(T-003。D-13の比較方針に基づく)/Issue #2
+- 比較対象とバージョン:公式 `birdnet` 0.2.16(PyPI)/`birdnet-analyzer` 2.4.0(PyPI)。いずれもBirdNETチーム(Stefan Taubert / Stefan Kahl)による
+- ライセンス:**ソースコードはMIT、学習済みモデル(v2.4等)はCC BY-NC-SA 4.0(非商用条件)**。研究・技術検証での利用を前提とし、有償調査・解析サービス・商品化への利用可否は未確認のため、本番利用前に権利者確認を必須とする(THIRD_PARTY_LICENSES.md)
+- 検証環境:Python 3.11.15、Linux(Claude Codeリモート実行環境)、pip 24.0
+
+**比較結果**
+
+| 観点 | birdnet 0.2.16 | birdnet-analyzer 2.4.0 |
+|---|---|---|
+| 位置づけ | パイプライン組み込み用の公式ライブラリ | CLI/GUIを持つ公式アプリケーション |
+| API | `birdnet.load("acoustic", "2.4", "tf")` → `AcousticPredictionSession` によるプログラマブルAPI。Perch v2対応(`load_perch_v2`) | `python -m birdnet_analyzer.analyze` のCLI実行が基本(モジュール:analyze/train/embeddings/segments/gui等) |
+| Custom Classifier | **実行**:`birdnet.load_custom(...)` で対応 | **学習**:`birdnet_analyzer.train` で対応 |
+| 依存規模 | 51パッケージ・約2.6GB(TensorFlow含む)。ai-edge-litert対応 | 68パッケージ・約2.8GB(TensorFlow、librosa、matplotlib等) |
+| インストール | `pip install birdnet==0.2.16` 成功 | `pip install birdnet-analyzer==2.4.0` 成功 |
+| モデル | BirdNET v2.4系。初回実行時に zenodo.org から自動取得 | BirdNET v2.4系。初回実行時に tuc.cloud から自動取得 |
+| 推論精度 | 同一モデル系列(v2.4)を使用するが、**前処理・バックエンド・設定を含む実際の出力一致は未検証** | 同左 |
+| モデルライセンス | CC BY-NC-SA 4.0(非商用条件。コードのMITと異なる) | 同左 |
+
+**決定**
+- 解析パイプライン(M1/T-103)への組み込みは **公式 `birdnet` 0.2.16** を採用する(pyproject.toml の optional-dependencies `audio` にピン留め)
+- **BirdNET-Analyzer はアプリの実行時依存にはしない。** Custom Classifier の学習(M4/T-403)と結果のクロスチェック用の独立ツールとして利用する
+- 採用理由:(1) セッション型のプログラマブルAPIでAnalysisRun記録・JobStep再開と整合させやすい、(2) `load_custom` により将来のCustom Classifier実行に対応(D-13の要件)、(3) 依存がやや軽く、アプリからのサブプロセスCLI呼び出しよりエラー処理・進捗取得が確実、(4) 同一チームの公式ライブラリであり、同一モデル系列(v2.4)を使用する(ただし実際の出力一致は未検証。下記の制約参照)
+
+**依存固定の状態(正確な記載)**
+- `birdnet` 本体は 0.2.16 に固定(pyproject.toml optional-dependencies `audio`)
+- `requirements-dev.lock` は**開発依存(dev)のみ**のロックであり、birdnetの**推移依存はまだ完全固定されていない**
+- ローカル対象環境で推論成功後に、audio依存を含むlock(例:`requirements-audio.lock`)を生成すること(AI_HANDOFF.md申し送り)
+
+**実行方法(記録)**
+```bash
+pip install ".[audio]"   # または pip install birdnet==0.2.16
+python -c "
+import birdnet, pathlib
+model = birdnet.load('acoustic', '2.4', 'tf')      # 初回はモデル自動ダウンロード
+with birdnet.AcousticPredictionSession(model) as s:
+    result = s.predict(pathlib.Path('sample.wav'))
+"
+```
+
+**制約(重要)**:本検証環境ではモデル配布元(zenodo.org / tuc.cloud)への通信が組織のegressポリシーで遮断されており(プロキシ403)、**推論実行までは未検証**。インストール・API検証・依存関係までを確認済み。T-103のローカル推論確認時に以下を必ず実施し、結果を本文書へ追記すること:
+- 推論スモークテスト(モデルダウンロード+合成WAVでの実行+処理速度計測)
+- **モデルの保存先・モデル形式・バージョン・SHA-256・オフライン再利用方法の確定**(モデルキャッシュを `BIO_OBSERVER_MODELS_DIR` 等の管理対象ディレクトリへ固定できるかの検証を含む。現時点でライブラリ既定の保存先は未確認)
+- 速度・精度に問題が出た場合は本決定を見直す(その場合も本エントリは上書きせず追記で改訂する)
+
 ---
 
 ## 旧・判断待ち事項の決定(P-1〜P-8 → D-14〜D-21)

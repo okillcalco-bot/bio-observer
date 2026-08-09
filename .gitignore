@@ -1,0 +1,72 @@
+# ===== 秘密情報(SECURITY.md:リポジトリへ保存禁止)=====
+.env
+.env.*
+!.env.example
+secrets/
+*.secret
+*.key
+*.pem
+
+# ===== 座標・機微情報(SECURITY.md / D-12:正確な座標をリポジトリへ入れない)=====
+private/
+*coordinates*
+*coords*
+site_locations*
+
+# ===== 原データ・派生データ(大容量。保存場所は .env で管理)=====
+data/
+originals/
+derived/
+*.mp4
+*.MP4
+*.mov
+*.MOV
+*.avi
+*.mkv
+*.mts
+*.m2ts
+*.wav
+*.WAV
+*.mp3
+*.flac
+*.ogg
+*.m4a
+
+# ===== モデル本体(Gitへ入れない)=====
+models/
+*.tflite
+*.onnx
+*.pt
+*.pb
+*.h5
+
+# ===== DB =====
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ===== ログ =====
+logs/
+*.log
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv*/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ===== エディタ・OS =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

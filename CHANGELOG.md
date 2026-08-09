@@ -1,5 +1,26 @@
 # 変更履歴(CHANGELOG.md)
 
+## 2026-08-09(PR #3 Codexレビュー対応)
+
+- THIRD_PARTY_LICENSES.md 新規作成。BirdNETのライセンス表記を修正(コード:MIT/学習済みモデル:CC BY-NC-SA 4.0。研究・技術検証前提、商用利用前の権利者確認を必須化)。D-22・READMEにも反映
+- 依存固定の状態を正確化(requirements-dev.lockは開発依存のみ、birdnet本体0.2.16固定、推移依存は未固定。ローカル推論成功後にaudio lockを生成する申し送り)
+- D-22のインストール例を `pip install ".[audio]"` へ修正
+- モデルがBIO_OBSERVER_MODELS_DIRへ自動保存されるという未確認記述を削除(保存先・形式・バージョン・SHA-256・オフライン再利用・キャッシュ固定可否はT-103で確定)
+- 「同一モデルなので精度は同等」の断定を撤回(同一モデル系列だが出力一致は未検証、へ修正)
+- STORAGE.mdの原データ保存パスを不透明ID方式へ変更(originals/<project_id>/<site_id>/<station_id>/<survey_session_id>/。地点名・希少種名をパスに使わない)
+- AI_HANDOFF.mdへT-103時の申し送り5項目を追加(推論スモークテスト/audio lock生成/libsndfile確認/モデル保存先・ハッシュ確認/商用利用前ライセンス確認)
+
+## 2026-08-09(T-003 リポジトリ初期化。Issue #2)
+
+- Pythonプロジェクト初期構成(src/bio_observer、pyproject.toml、Python 3.11固定、依存ピン留め+requirements-dev.lock)
+- STORAGE.md 追加(原データ/派生データ/モデル/DB/ログのディレクトリ方針)
+- .env.example 追加(保存場所・FFmpegパス・タイムゾーン。秘密情報・座標を含めない)
+- .gitignore 追加(動画・音声・モデル・DB・座標・秘密情報・ログを除外)
+- 環境確認:FFmpeg/FFprobe 6.1.1、環境確認テスト7件、`bio-observer-envcheck` CLI
+- 音声ライブラリ比較検証(D-13)→ 公式 birdnet 0.2.16 を採用(D-22)。BirdNET-Analyzer 2.4.0 はCustom Classifier学習・クロスチェック用の独立ツールと位置づけ
+- 制約:本検証環境ではモデル配布元への通信遮断により推論未検証(M1着手時にローカル解析機で実施)
+- 解析機能・DBスキーマ・UIは未実装(T-004以降)
+
 ## 2026-08-09(T-002再レビュー承認・最終更新)
 
 - Codex再レビュー結果:前回指摘すべて反映済み・重大な矛盾なし・実装開始可・PR #1承認

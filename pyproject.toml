@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bio-observer"
+version = "0.1.0"
+description = "猛禽類・鳥類長時間モニタリング基盤(調査支援。AIは候補提示のみで自動確定しない)"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = { text = "Proprietary" }
+dependencies = [
+    "python-dotenv==1.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+]
+# 音声解析(M1/T-103で使用。D-22:公式 birdnet を採用)
+# モデル本体は初回実行時に自動ダウンロードされる(保存先の確定・管理ディレクトリへの
+# 固定可否はT-103のローカル推論確認で検証する。D-22)。推移依存は未ロック(D-22)
+audio = [
+    "birdnet==0.2.16",
+]
+
+[project.scripts]
+bio-observer-envcheck = "bio_observer.envcheck:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,64 +1,67 @@
 # AI引き継ぎ(AI_HANDOFF.md)
 
-- 最終更新:2026-08-09/更新者:Fable
+- 最終更新:2026-08-09/更新者:Claude Code(T-003)
 - Claude Code・Codexは作業開始前に PROJECT_CHARTER.md・本文書・TASKS.md を確認し、作業終了時に本文書と TASKS.md を更新すること。
 
 ---
 
 ## 現在の状態
 
-**PR #1 マージ待ち。** 設計フェーズ(M0)の成果物はCodexによるT-002設計レビュー(再レビュー含む)で承認済み。文書間の重大な矛盾なし、実装開始を妨げる問題なし。コードは未着手(マージ後にT-003から開始)。
+フェーズ0(基盤)。設計はPR #1でmainへマージ済み。T-003(リポジトリ初期化)を完了し、PRレビュー待ち(Issue #2、ブランチ claude/t003-repo-init)。解析機能・DBスキーマ・UIは未実装(T-004以降)。
 
 ## 完了したこと
 
-- 設計ドキュメント初版一式(PROJECT_CHARTER / ARCHITECTURE / DATA_MODEL / SURVEY_METHOD / SECURITY / ROADMAP / DECISIONS / TASKS / AI_HANDOFF / CHANGELOG)
-- PR #1 作成(https://github.com/okillcalco-bot/bio-observer/pull/1)
-- CodexレビューT-002指摘10件の反映(D-7〜D-21)と再レビューによる承認(T-002完了)
-- 旧判断待ちP-1〜P-8をD-14〜D-21として決定済みへ移行(判断待ちは現在ゼロ)
-- 既存HTMLプロトタイプ2点を archive/prototypes/ へ移動(D-21)
-- 再レビュー時の最終指摘の反映(実装時の確認事項の明文化、ReferenceObservationの精査メタデータ追加)
+- 設計ドキュメント一式(PR #1、mainへマージ済み)
+- T-003 リポジトリ初期化(Issue #2):
+  - Pythonプロジェクト初期構成(src/bio_observer、pyproject.toml、Python 3.11固定)
+  - 依存関係の固定(python-dotenv 1.0.1、pytest 8.3.4、requirements-dev.lock)
+  - FFmpeg/FFprobe 6.1.1の利用確認(合成メディア生成→ffprobe取得までテストで検証)
+  - .env.example(保存場所・FFmpegパス・タイムゾーン。秘密情報・座標なし)
+  - .gitignore(動画・音声・モデル・DB・座標・秘密情報・ログを除外)
+  - STORAGE.md(原データ/派生データ/モデル/DB/ログのディレクトリ方針)
+  - 音声ライブラリ比較検証 → 公式 birdnet 0.2.16 を採用(D-22。BirdNET-AnalyzerはCustom Classifier学習・クロスチェック用の独立ツール)
+  - 環境確認テスト7件(tests/test_environment.py)+ `bio-observer-envcheck` CLI
 
 ## 未完了のこと
 
-- PR #1 のマージ(調査責任者の実施待ち)
-- コードは一切未着手(環境構築・スキーマ・パイプライン・UIすべて)
+- T-003 PRのレビュー・マージ
+- T-004以降すべて(DBスキーマ、解析パイプライン、UI)
+- **M1着手時(T-103)にローカル解析機で必ず実施する申し送り事項**(結果はDECISIONS.md D-22とTHIRD_PARTY_LICENSES.mdへ追記):
+  1. **ローカル推論スモークテスト**:モデルダウンロード+合成WAVでの推論実行+処理速度計測(本検証環境ではモデル配布元 zenodo.org / tuc.cloud がegressポリシーで遮断され未実施)
+  2. **audio推移依存のlock生成**:推論成功後に `pip freeze` でaudio依存を含むlock(`requirements-audio.lock`)を生成する(現状 `requirements-dev.lock` は開発依存のみ。birdnet本体は0.2.16固定だが推移依存は未固定)
+  3. **libsndfile確認**:soundfileが依存するネイティブライブラリ libsndfile の存在・バージョンを対象環境で確認する
+  4. **モデル保存先・ハッシュ確認**:モデルの保存先・形式・バージョン・SHA-256・オフライン再利用方法を確定し、モデルキャッシュを `BIO_OBSERVER_MODELS_DIR` 等の管理対象ディレクトリへ固定できるか検証する
+  5. **商用利用前のライセンス確認**:BirdNETモデルはCC BY-NC-SA 4.0(非商用条件)。有償調査・解析サービス・商品化での利用前に権利者確認を必須とする(THIRD_PARTY_LICENSES.md)
 
 ## 次に行うべきこと
 
-1. 調査責任者:PR #1 のマージ
-2. Claude Code:マージ後にT-003 リポジトリ初期化(音声ライブラリ比較決定D-13を含む)→ T-004 DBスキーマ実装
-3. Codex:T-005 スキーマレビュー
-
-## 実装時の確認事項(Codex再レビューでの申し送り)
-
-実装者(Claude Code)は以下を満たすこと。Codexはレビュー時にこれを確認すること。
-
-1. **SEDとBirdNETの検出を統合した後も、各モデルの生スコア・モデル版・判定根拠を統合前のまま保持する**(統合結果だけを残さない。DATA_MODEL.md 3.8)
-2. **イミュータブルなエンティティを上書き更新しない**(完了後のAnalysisRun、Review、AccessLog、RunEvent。修正・状態変化は常に追記で表現する。D-1/D-10)
-3. **ReferenceObservationに精査者・精査方法・確信度・二重確認の有無を持たせる**(DATA_MODEL.md 3.18。ベンチマーク正解データの品質を担保する)
+1. Codex:T-005の前段として、T-003 PRのレビュー
+2. 調査責任者:T-003 PRのマージ判断
+3. Claude Code:マージ後にT-004 DBスキーマ実装(1 Issue = 1 branch = 1 PR)
 
 ## 既知の問題
 
-- なし
+- 本リモート環境からは zenodo.org / tuc.cloud への通信が遮断されており、BirdNETモデルの取得・推論実行ができない(ローカル解析機では問題にならない見込み。D-2のローカル実行方針どおり)
 
 ## 判断が必要な事項
 
-- 現在なし(DECISIONS.md の判断待ちはゼロ)
+- 現在なし
 
 ## 実行したテスト/テスト結果
 
-- なし(設計フェーズのためコード・テスト未作成)
-- 文書間整合性:D-7〜D-21の反映と相互参照をレビューで確認済み。Codex再レビュー結果=前回指摘すべて反映済み・重大な矛盾なし・実装開始可・PR #1承認
+- `pytest`:7件すべてパス(Python版、パッケージimport、ffmpeg/ffprobe存在、合成メディア生成+ffprobe読取、設定既定値、.env.example機微混入チェック)
+- `bio-observer-envcheck`:すべてOK(Python 3.11.15 / ffmpeg 6.1.1 / ffprobe 6.1.1 / 設定読み込み)
+- ライブラリ比較:birdnet 0.2.16・birdnet-analyzer 2.4.0のインストール・API検証(詳細はD-22)。推論は上記の通り未実施
 
 ## 使用モデル・環境
 
-- 設計:Claude(Fable役)、Claude Code リモート実行環境(Linux)
-- 実装予定:Python + FFmpeg + OpenCV + BirdNET(ライブラリはT-003で比較決定。D-13)+ SQLite(ARCHITECTURE.md 第8章)
+- 実行環境:Python 3.11.15、pip 24.0、FFmpeg/FFprobe 6.1.1、Linux(Claude Codeリモート実行環境)
+- 採用ライブラリ:birdnet 0.2.16(pyproject optional-dependencies `audio`。D-22)
 
 ## 関連コミット
 
-- 設計初版:49aac3b/Codexレビュー反映:1f7193e/最終更新:本コミット(いずれもブランチ claude/raptor-monitoring-platform-design-dhw923、PR #1)
-- 既存:7231874、cc5719a、cbeb83d
+- 設計:PR #1(main: 24c56d2)
+- T-003:本ブランチ claude/t003-repo-init(Issue #2)
 
 ## 変更してはいけない事項
 
@@ -69,3 +72,4 @@
 - 正確な座標を外部サービス・ログ・リポジトリへ出さないこと。T-303実装まではDBへも保存しないこと(SECURITY.md、D-12)
 - ベンチマーク評価の正解データはReferenceObservationとし、野帳記録で代用しないこと(D-11)
 - 統合後の検出でも各モデルの生スコア・モデル版・判定根拠を保持すること(DATA_MODEL.md 3.8)
+- .gitignoreの機微・大容量除外パターンを緩めないこと(SECURITY.md)
