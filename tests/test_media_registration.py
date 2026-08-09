@@ -3,6 +3,7 @@
 実地データは使わず、FFmpegで生成した合成メディアのみを使用する(SECURITY.md)。
 """
 
+import errno
 import hashlib
 import shutil
 import sqlite3
@@ -262,6 +263,76 @@ def test_finalize_is_exclusive_even_after_preflight(
 def test_unknown_session_rejected_before_copy(db, storage, sample_video):
     with pytest.raises(media_registry.MediaRegistrationError, match="SurveySession"):
         register_media(db, sample_video, "ses_deadbeef", storage=storage)
+    assert _leftover_files(storage) == []
+
+
+def test_part_discard_failure_rolls_back_final(db, seed, storage, sample_video, monkeypatch):
+    """link成功後に一時ファイル削除が失敗しても、DB行のない確定ファイルを残さない。"""
+    def boom(part):
+        raise OSError("simulated part unlink failure")
+    monkeypatch.setattr(media_registry, "_discard_part", boom)
+    sha = compute_sha256(sample_video)
+    with pytest.raises(OSError):
+        register_media(db, sample_video, seed["session"], storage=storage)
+    (count,) = db.execute("SELECT COUNT(*) FROM media_asset WHERE sha256 = ?",
+                          (sha,)).fetchone()
+    assert count == 0
+    assert _leftover_files(storage) == []  # 確定ファイルも一時ファイルも残らない
+
+
+def _force_link_unsupported(monkeypatch):
+    """ハードリンク非対応FS(exFAT等)を再現:os.linkがEPERMで失敗する。"""
+    def no_link(src, dst):
+        raise OSError(errno.EPERM, "hard links not supported (simulated)")
+    monkeypatch.setattr(media_registry.os, "link", no_link)
+
+
+def test_fallback_without_hardlink_registers_exclusively(
+        db, seed, storage, sample_video, monkeypatch):
+    """ハードリンク非対応FSでもO_EXCLの排他的作成で登録が成功する。"""
+    _force_link_unsupported(monkeypatch)
+    result = register_media(db, sample_video, seed["session"], storage=storage)
+    dest = storage.originals_dir / result.relative_path
+    assert hashlib.sha256(dest.read_bytes()).hexdigest() == result.sha256
+    assert all(not p.name.endswith(".part") for p in _leftover_files(storage))
+
+
+def test_fallback_never_overwrites_existing_final(
+        db, seed, storage, sample_video, monkeypatch):
+    """ハードリンク非対応FSのフォールバックでも既存確定ファイルを上書きしない。"""
+    _force_link_unsupported(monkeypatch)
+    _fixed_media_id(monkeypatch, "med_collision2222222222222222222")
+    dest = (storage.originals_dir / seed["project"] / seed["site"]
+            / seed["station"] / seed["session"]
+            / "med_collision2222222222222222222.mp4")
+    sentinel = b"existing asset on exfat - must not change"
+
+    # 事前確認の後に既存ファイルが現れるTOCTOU状況でも、O_EXCLが上書きを拒否する
+    real_copy = media_registry._copy_with_hash
+
+    def copy_then_plant(source, part):
+        digest = real_copy(source, part)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(sentinel)
+        return digest
+
+    monkeypatch.setattr(media_registry, "_copy_with_hash", copy_then_plant)
+    with pytest.raises(PathCollisionError):
+        register_media(db, sample_video, seed["session"], storage=storage)
+    assert dest.read_bytes() == sentinel
+    assert [p for p in _leftover_files(storage) if p != dest] == []
+
+
+def test_link_failure_with_other_errno_does_not_fall_back(
+        db, seed, storage, sample_video, monkeypatch):
+    """ハードリンク非対応以外のOSError(例:ENOSPC)はフォールバックせず失敗する。"""
+    def link_enospc(src, dst):
+        raise OSError(errno.ENOSPC, "no space left (simulated)")
+    monkeypatch.setattr(media_registry.os, "link", link_enospc)
+    with pytest.raises(OSError) as exc:
+        register_media(db, sample_video, seed["session"], storage=storage)
+    assert exc.value.errno == errno.ENOSPC
+    assert not isinstance(exc.value, media_registry.MediaRegistrationError)
     assert _leftover_files(storage) == []
 
 

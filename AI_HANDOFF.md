@@ -57,11 +57,11 @@
 ## T-101実装の要点(レビュー観点)
 
 - `bio_observer.media_registry`:probe_media(FFprobe)/compute_sha256(ストリーミング)/register_media
-- 登録手順:probe→容量確認→コピー(1パスでハッシュ計算)→コピー先再ハッシュ照合→重複確認→DB挿入→atomic rename→commit。例外時はrollback+ファイル削除(D-26)
+- 登録手順:probe→容量確認→コピー(1パスでハッシュ計算)→コピー先再ハッシュ照合→重複確認→DB挿入→排他的確定→commit。例外時はrollback+本呼出し作成分のみ削除(D-26)
 - 保存先は originals/<project_id>/<site_id>/<station_id>/<survey_session_id>/<media_id><ext>(元ファイル名を露出しない)
 - certainty='confirmed' は basis='manual'/'corrected' のみ許可(自動断定禁止)
-- レビュー対応:既存資産の不可侵(衝突時は既存へ触れず失敗、削除は本呼出し作成分のみ)、os.linkによる排他的・原子的確定(exFAT等はフォールバック+限界をD-26に記録)、トランザクション所有契約のdocstring明文化(SAVEPOINT化は将来検討の申し送り)
-- テスト14件:動画/WAV登録、ストリーミングハッシュ一致、重複拒否、破損ファイル、不存在・非対応拡張子、容量不足、confirmed制限、確定失敗時クリーンアップ、不明セッション、probe単体、ID衝突時の既存行・ファイル不可侵、既存確定先の上書き・削除拒否、TOCTOU時の排他的確定
+- レビュー対応:既存資産の不可侵(衝突時は既存へ触れず失敗、削除は本呼出し作成分のみ)、os.linkによる排他的確定、後処理失敗も完全ロールバック(link成功後のpart削除失敗で確定ファイルを取り消す)、ハードリンク非対応FSはerrno判別の上でO_EXCL排他的作成へフォールバック(os.replaceは全経路から排除)、トランザクション所有契約のdocstring明文化(SAVEPOINT化は将来検討の申し送り)
+- テスト18件:動画/WAV登録、ストリーミングハッシュ一致、重複拒否、破損ファイル、不存在・非対応拡張子、容量不足、confirmed制限、確定失敗時クリーンアップ、不明セッション、probe単体、ID衝突時の既存行・ファイル不可侵、既存確定先の上書き・削除拒否、TOCTOU時の排他的確定
 
 ## 承認済み追加要件:Google Drive自動取込(T-110 / Issue #6)
 
@@ -81,7 +81,7 @@
 
 ## 実行したテスト/テスト結果
 
-- `pytest`:48件すべてパス(環境確認7件+DB27件+メディア登録14件)
+- `pytest`:52件すべてパス(環境確認7件+DB27件+メディア登録18件)
 - DBテスト内訳:空DBへの最新スキーマ構築/1バージョンずつの段階的マイグレーション/再実行の冪等性/外部キー有効化・integrity_check/正確座標列の不存在検査/不透明IDポリシー/UTCヘルパー/FK違反拒否/一意制約/enum CHECK拒否/SED由来・種候補なしAudioDetection保存/統合後の生スコア保持/ReferenceObservation精査情報+二重確認CHECK/review追記専用/analysis_run完了後凍結/run_event・access_log追記専用/DetectionLink確定に人の記録必須
 - `bio-observer-envcheck`:すべてOK(Python 3.11.15 / ffmpeg 6.1.1 / ffprobe 6.1.1 / 設定読み込み)
 - ライブラリ比較:birdnet 0.2.16・birdnet-analyzer 2.4.0のインストール・API検証(詳細はD-22)。推論は未実施(T-103申し送り)

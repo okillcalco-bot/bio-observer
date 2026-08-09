@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -163,25 +164,64 @@ def _session_chain(conn: sqlite3.Connection, survey_session_id: str) -> tuple[st
     return row["project_id"], row["site_id"], row["station_id"]
 
 
-def _finalize_exclusive(part: Path, final: Path) -> None:
-    """一時ファイルを確定パスへ、既存ファイルを上書きせず原子的に確定する。
+# os.link がハードリンク非対応を示す errno のみフォールバックする(それ以外は再送出)
+_LINK_UNSUPPORTED_ERRNOS = {
+    errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS, errno.EINVAL, errno.EXDEV,
+}
 
-    同一ディレクトリ内で os.link により確定名を排他的に作成する(既存があれば
-    FileExistsError となり、既存ファイルは変更されない)。成功後に一時ファイルを
-    削除する。ハードリンク非対応のファイルシステム(exFAT等)では、存在確認の上で
-    os.replace へフォールバックする(この場合のみ確認と確定の間にTOCTOU窓が残る。
-    限界としてD-26に記録)。
+
+def _discard_part(part: Path) -> None:
+    """確定成功後の一時ファイル削除(テストから失敗を注入できる分離点)。"""
+    part.unlink()
+
+
+def _exclusive_copy(part: Path, final: Path) -> None:
+    """O_EXCLで確定名を排他的に作成し、一時ファイルの内容をコピーする。
+
+    既存ファイルがあれば FileExistsError(上書きは構造的に不可能)。コピー途中で
+    失敗した場合、自分が排他的に作成した確定ファイルのみ削除して再送出する。
+    """
+    fd = os.open(final, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    try:
+        with os.fdopen(fd, "wb") as dst, open(part, "rb") as src:
+            while chunk := src.read(_CHUNK_SIZE):
+                dst.write(chunk)
+            dst.flush()
+            os.fsync(dst.fileno())
+    except BaseException:
+        final.unlink(missing_ok=True)
+        raise
+
+
+def _finalize_exclusive(part: Path, final: Path) -> None:
+    """一時ファイルを確定パスへ、既存ファイルを上書きせず排他的に確定する。
+
+    - 第一手段:同一ディレクトリ内の os.link による確定名の排他的作成
+      (既存があれば FileExistsError となり、既存ファイルは変更されない)
+    - ハードリンク非対応FS(exFAT等。errnoで判別):O_EXCL による排他的作成+
+      コピーへフォールバックする。どの経路でも既存ファイルの上書きは起こらない
+    - 確定後の一時ファイル削除に失敗した場合は、自分が作成した確定ファイルを
+      取り消して(削除して)例外を再送出する=後処理失敗も完全ロールバック(D-26)
     """
     try:
         os.link(part, final)
     except FileExistsError:
-        raise PathCollisionError(f"確定先が既に存在します(既存ファイルは変更しません): {final.name}")
+        raise PathCollisionError(
+            f"確定先が既に存在します(既存ファイルは変更しません): {final.name}")
+    except OSError as exc:
+        if exc.errno not in _LINK_UNSUPPORTED_ERRNOS:
+            raise
+        try:
+            _exclusive_copy(part, final)
+        except FileExistsError:
+            raise PathCollisionError(
+                f"確定先が既に存在します(既存ファイルは変更しません): {final.name}")
+    # 確定名の作成に成功。一時ファイルの削除失敗も完全にロールバックする
+    try:
+        _discard_part(part)
     except OSError:
-        if final.exists():
-            raise PathCollisionError(f"確定先が既に存在します(既存ファイルは変更しません): {final.name}")
-        os.replace(part, final)
-        return
-    part.unlink()
+        final.unlink(missing_ok=True)  # 自分が作成した確定ファイルのみ取り消す
+        raise
 
 
 def _validate_recording_start(
