@@ -1,5 +1,15 @@
 # 変更履歴(CHANGELOG.md)
 
+## 2026-08-09(CodexレビューT-005指摘対応)
+
+- media_asset:物理DELETE拒否・sha256変更拒否トリガーを追加(原則3)。原本同一性フィールドの方針をD-23へ追記
+- 系譜整合トリガー:derived_assetのRun⇄メディア一致、derived_asset_detectionのRun一致を強制(誤接続の拒否)
+- review:確認状態と判定内容の整合CHECK(SURVEY_METHOD.md 3.2.1に許容組合せ表を新設)、confirmed_taxon列を追加。NULL安全なIS/COALESCEを使用
+- 時刻・範囲CHECK:検出・精査データ・撮影開始日時にUTC ISO-8601形式/開始≦終了/非負オフセット、Run・JobStep終端状態にfinished_at必須(failedはerror必須)。迂回防止方針をD-23へ記録
+- reference_observation:二重確認に第二精査者+精査日時の両方を必須化
+- derived_asset:present状態でsha256必須(推奨事項対応)
+- テスト5件追加(全33件パス)
+
 ## 2026-08-09(先行成果品の分析に基づくT-004スキーマ補強。D-24/D-25)
 
 - 先行成果品(Google Drive参考資料:画角別解析結果・track_summary約35特徴量・config_used約70パラメータ・positive/insurance区分・人によるスクリーニング結果)を分析し、将来の映像解析結果を保存できるかを検証

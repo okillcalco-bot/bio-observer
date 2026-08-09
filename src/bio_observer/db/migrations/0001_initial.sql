@@ -151,9 +151,25 @@ CREATE TABLE media_asset (
     deleted_at TEXT,
     note TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    CHECK (recording_started_at IS NULL OR recording_started_at GLOB
+        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z')
 );
 CREATE INDEX idx_media_asset_session ON media_asset(survey_session_id);
+
+-- 原則3(原データ不変):物理削除禁止(論理削除 deleted_at のみ)、原本同一性 sha256 は変更禁止
+CREATE TRIGGER trg_media_asset_no_delete
+BEFORE DELETE ON media_asset
+BEGIN
+    SELECT RAISE(ABORT, 'media_asset must not be deleted physically: set deleted_at instead (原則3)');
+END;
+
+CREATE TRIGGER trg_media_asset_sha256_immutable
+BEFORE UPDATE OF sha256 ON media_asset
+WHEN OLD.sha256 <> NEW.sha256
+BEGIN
+    SELECT RAISE(ABORT, 'media_asset.sha256 is immutable (原則3)');
+END;
 
 -- ============ 解析実行(D-10: 完了後凍結) ============
 
@@ -176,7 +192,10 @@ CREATE TABLE analysis_run (
     error TEXT,
     parent_run_id TEXT REFERENCES analysis_run(id),
     note TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- 終端状態の整合性:完了・失敗・中断には終了時刻が必須、失敗にはエラー内容が必須
+    CHECK (status NOT IN ('completed', 'failed', 'aborted') OR finished_at IS NOT NULL),
+    CHECK (status <> 'failed' OR error IS NOT NULL)
 );
 CREATE INDEX idx_analysis_run_media ON analysis_run(media_asset_id);
 CREATE INDEX idx_analysis_run_parent ON analysis_run(parent_run_id);
@@ -209,7 +228,10 @@ CREATE TABLE job_step (
     note TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE (analysis_run_id, step_name)
+    UNIQUE (analysis_run_id, step_name),
+    -- 終端状態の整合性(skippedは時刻なしを許容)
+    CHECK (status NOT IN ('completed', 'failed') OR finished_at IS NOT NULL),
+    CHECK (status <> 'failed' OR error IS NOT NULL)
 );
 CREATE INDEX idx_job_step_run ON job_step(analysis_run_id);
 
@@ -273,7 +295,12 @@ CREATE TABLE visual_detection (
     -- 各モデルの生スコア・モデル名/版・判定根拠(DATA_MODEL.md 3.8 と同趣旨)
     raw_model_outputs_json TEXT NOT NULL DEFAULT '[]',
     note TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- 時刻・範囲の基本整合性(UTC ISO-8601形式、開始<=終了、非負オフセット)
+    CHECK (started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z'),
+    CHECK (ended_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z'),
+    CHECK (ended_at >= started_at),
+    CHECK (media_start_offset_s >= 0 AND media_end_offset_s >= media_start_offset_s)
 );
 CREATE INDEX idx_visual_detection_run ON visual_detection(analysis_run_id);
 CREATE INDEX idx_visual_detection_time ON visual_detection(started_at);
@@ -303,7 +330,11 @@ CREATE TABLE audio_detection (
     -- (代表スコア top_confidence だけで置き換えない。DATA_MODEL.md 3.8)
     raw_model_outputs_json TEXT NOT NULL,
     note TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    CHECK (started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z'),
+    CHECK (ended_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z'),
+    CHECK (ended_at >= started_at),
+    CHECK (media_start_offset_s >= 0 AND media_end_offset_s >= media_start_offset_s)
 );
 CREATE INDEX idx_audio_detection_run ON audio_detection(analysis_run_id);
 CREATE INDEX idx_audio_detection_time ON audio_detection(started_at);
@@ -323,6 +354,8 @@ CREATE TABLE review (
     species_id TEXT REFERENCES species(id),
     confirmed_rank TEXT
         CHECK (confirmed_rank IS NULL OR confirmed_rank IN ('species', 'genus', 'family', 'raptor', 'bird')),
+    -- 属・科まで確認の場合の分類群名(属名・科名)
+    confirmed_taxon TEXT,
     age_class TEXT,
     sex TEXT,
     individual_identifiable INTEGER
@@ -335,7 +368,27 @@ CREATE TABLE review (
     rationale TEXT,
     note TEXT,
     created_at TEXT NOT NULL,
-    CHECK ((visual_detection_id IS NULL) <> (audio_detection_id IS NULL))
+    CHECK ((visual_detection_id IS NULL) <> (audio_detection_id IS NULL)),
+    -- 確認状態と判定内容の整合性(SURVEY_METHOD.md 3.2。許容組合せの定義は同3.2.1)
+    -- 注意:NULL比較でCHECKが素通りしないよう、NULL安全な IS / COALESCE を使う
+    CHECK (
+        (review_status = 'species_confirmed'
+            AND species_id IS NOT NULL AND confirmed_rank IS 'species')
+        OR (review_status = 'genus_family_confirmed'
+            AND species_id IS NULL AND COALESCE(confirmed_rank, '') IN ('genus', 'family')
+            AND confirmed_taxon IS NOT NULL)
+        OR (review_status = 'raptor_confirmed'
+            AND species_id IS NULL AND confirmed_rank IS 'raptor')
+        OR (review_status = 'bird_confirmed'
+            AND species_id IS NULL AND confirmed_rank IS 'bird')
+        OR (review_status = 'species_unknown'
+            AND species_id IS NULL AND confirmed_rank IS NULL)
+        OR (review_status = 'false_positive'
+            AND species_id IS NULL AND confirmed_rank IS NULL
+            AND false_positive_cause IS NOT NULL)
+        OR (review_status IN ('undeterminable', 'recheck_needed')
+            AND species_id IS NULL AND confirmed_rank IS NULL)
+    )
 );
 CREATE INDEX idx_review_visual ON review(visual_detection_id);
 CREATE INDEX idx_review_audio ON review(audio_detection_id);
@@ -395,10 +448,27 @@ CREATE TABLE derived_asset (
         'present', 'deleted_regenerable', 'regenerating', 'regeneration_failed')),
     note TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- 実体が存在する状態ではハッシュ必須(生成途中はregenerating等を使う)
+    CHECK (regeneration_state <> 'present' OR sha256 IS NOT NULL)
 );
 CREATE INDEX idx_derived_asset_media ON derived_asset(media_asset_id);
 CREATE INDEX idx_derived_asset_run ON derived_asset(analysis_run_id);
+
+-- 系譜整合:derived_assetのmedia_assetは、生成したanalysis_runのmedia_assetと一致すること
+CREATE TRIGGER trg_derived_asset_lineage_insert
+BEFORE INSERT ON derived_asset
+WHEN (SELECT media_asset_id FROM analysis_run WHERE id = NEW.analysis_run_id) <> NEW.media_asset_id
+BEGIN
+    SELECT RAISE(ABORT, 'derived_asset lineage mismatch: analysis_run belongs to a different media_asset');
+END;
+
+CREATE TRIGGER trg_derived_asset_lineage_update
+BEFORE UPDATE OF media_asset_id, analysis_run_id ON derived_asset
+WHEN (SELECT media_asset_id FROM analysis_run WHERE id = NEW.analysis_run_id) <> NEW.media_asset_id
+BEGIN
+    SELECT RAISE(ABORT, 'derived_asset lineage mismatch: analysis_run belongs to a different media_asset');
+END;
 
 -- 派生物と検出の対応(多対多)。1クリップに複数track、1trackが複数クリップに
 -- またがる場合に対応する。role='primary' はその派生物の主対象(任意)
@@ -417,6 +487,37 @@ CREATE UNIQUE INDEX uq_dad_audio ON derived_asset_detection(derived_asset_id, au
     WHERE audio_detection_id IS NOT NULL;
 CREATE INDEX idx_dad_visual ON derived_asset_detection(visual_detection_id);
 CREATE INDEX idx_dad_audio ON derived_asset_detection(audio_detection_id);
+
+-- 系譜整合:対応づける検出は、その派生物を生成したanalysis_runの検出であること
+CREATE TRIGGER trg_dad_run_match_insert
+BEFORE INSERT ON derived_asset_detection
+WHEN (
+    NEW.visual_detection_id IS NOT NULL
+    AND (SELECT analysis_run_id FROM visual_detection WHERE id = NEW.visual_detection_id)
+        <> (SELECT analysis_run_id FROM derived_asset WHERE id = NEW.derived_asset_id)
+) OR (
+    NEW.audio_detection_id IS NOT NULL
+    AND (SELECT analysis_run_id FROM audio_detection WHERE id = NEW.audio_detection_id)
+        <> (SELECT analysis_run_id FROM derived_asset WHERE id = NEW.derived_asset_id)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'derived_asset_detection run mismatch: detection belongs to a different analysis_run');
+END;
+
+CREATE TRIGGER trg_dad_run_match_update
+BEFORE UPDATE OF derived_asset_id, visual_detection_id, audio_detection_id ON derived_asset_detection
+WHEN (
+    NEW.visual_detection_id IS NOT NULL
+    AND (SELECT analysis_run_id FROM visual_detection WHERE id = NEW.visual_detection_id)
+        <> (SELECT analysis_run_id FROM derived_asset WHERE id = NEW.derived_asset_id)
+) OR (
+    NEW.audio_detection_id IS NOT NULL
+    AND (SELECT analysis_run_id FROM audio_detection WHERE id = NEW.audio_detection_id)
+        <> (SELECT analysis_run_id FROM derived_asset WHERE id = NEW.derived_asset_id)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'derived_asset_detection run mismatch: detection belongs to a different analysis_run');
+END;
 
 -- ============ 精査済み評価データ(D-11) ============
 
@@ -442,7 +543,12 @@ CREATE TABLE reference_observation (
     note TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    CHECK (double_checked = 0 OR second_curator IS NOT NULL)
+    -- 二重確認には第二精査者と精査日時の両方が必須
+    CHECK (double_checked = 0 OR (second_curator IS NOT NULL AND second_curated_at IS NOT NULL)),
+    CHECK (started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z'),
+    CHECK (ended_at IS NULL OR (ended_at GLOB
+        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z'
+        AND ended_at >= started_at))
 );
 CREATE INDEX idx_reference_observation_session ON reference_observation(survey_session_id);
 

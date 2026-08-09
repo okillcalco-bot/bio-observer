@@ -7,7 +7,7 @@
 
 ## 現在の状態
 
-フェーズ0(基盤)。T-003はPR #3でmainへマージ済み(Issue #2クローズ)。T-004(DBスキーマ・マイグレーション基盤)を実装完了し、CodexによるT-005レビュー待ち(Issue #4、ブランチ claude/t004-database-schema)。解析機能(FFmpeg抽出・BirdNET・SED・映像検出)・API・UIは未実装(T-101以降)。
+フェーズ0(基盤)。T-003はPR #3でmainへマージ済み(Issue #2クローズ)。T-004(DBスキーマ・マイグレーション基盤)は実装完了し、CodexのT-005レビュー指摘(必須4点+推奨1点)への対応を反映済み。T-005再レビュー待ち(Issue #4、PR #5、ブランチ claude/t004-database-schema)。解析機能(FFmpeg抽出・BirdNET・SED・映像検出)・API・UIは未実装(T-101以降)。
 
 ## 完了したこと
 
@@ -27,7 +27,8 @@
   - 追記専用の担保:review/access_log/run_event はUPDATE/DELETE拒否、analysis_runは完了後凍結(トリガー。限界はD-23に明記)
   - 不透明ID(`ids.new_id`、登録制プレフィックス)・UTC日時ヘルパー(naive拒否)
   - 正確な座標列は不存在(D-12。テストで列名検査)
-  - DBテスト21件(空DB構築/段階的アップグレード/冪等性/FK・一意・enum違反/SED由来種候補なし保存/生スコア保持/精査情報/追記専用/確定に人の記録必須/Track⇄クリップ多対多/候補区分・実時刻確実性)
+  - DBテスト26件(空DB構築/段階的アップグレード/冪等性/FK・一意・enum違反/SED由来種候補なし保存/生スコア保持/精査情報/追記専用/確定に人の記録必須/Track⇄クリップ多対多/候補区分・実時刻確実性/原データDELETE・sha256変更拒否/系譜整合/Review整合/時刻・範囲CHECK)
+- CodexレビューT-005指摘対応(D-23追記):原データ物理DELETE禁止トリガー、derived_asset/derived_asset_detectionの系譜整合トリガー、Review整合CHECK(SURVEY_METHOD.md 3.2.1)+confirmed_taxon列、時刻・範囲CHECK(UTC形式GLOB・開始≦終了・非負オフセット・終端状態のfinished_at/error必須)、二重確認の第二精査日時必須化、DerivedAsset present時sha256必須
 - 先行成果品(Google Drive参考資料)の分析とスキーマ反映(D-24/D-25):
   - Track⇄クリップの多対多(DerivedAssetDetection)、positive/insurance候補区分+理由、実時刻の算出根拠(file_time追加)と確実性、Station既定解析パラメータ、DerivedAsset種別にpreview_image/report追加
   - Track特徴量はハイブリッド方式(主要項目=固定列、その他=feature_schema_version付きJSON。D-24)
@@ -62,7 +63,7 @@
 
 ## 実行したテスト/テスト結果
 
-- `pytest`:26件すべてパス(環境確認7件+DB19件)
+- `pytest`:33件すべてパス(環境確認7件+DB26件)
 - DBテスト内訳:空DBへの最新スキーマ構築/1バージョンずつの段階的マイグレーション/再実行の冪等性/外部キー有効化・integrity_check/正確座標列の不存在検査/不透明IDポリシー/UTCヘルパー/FK違反拒否/一意制約/enum CHECK拒否/SED由来・種候補なしAudioDetection保存/統合後の生スコア保持/ReferenceObservation精査情報+二重確認CHECK/review追記専用/analysis_run完了後凍結/run_event・access_log追記専用/DetectionLink確定に人の記録必須
 - `bio-observer-envcheck`:すべてOK(Python 3.11.15 / ffmpeg 6.1.1 / ffprobe 6.1.1 / 設定読み込み)
 - ライブラリ比較:birdnet 0.2.16・birdnet-analyzer 2.4.0のインストール・API検証(詳細はD-22)。推論は未実施(T-103申し送り)

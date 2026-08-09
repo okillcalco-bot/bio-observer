@@ -134,6 +134,13 @@ with birdnet.AcousticPredictionSession(model) as s:
   - **限界(明記)**:SQLiteのトリガーはDDL権限があれば削除可能であり、DBファイルへ直接アクセスできる利用者に対する完全な防御ではない。誤操作(アプリのバグ・手動SQL)への防御と位置づける。PostgreSQL移行時はロール権限(INSERT可・UPDATE/DELETE不可)での担保へ置き換える。
 - 反映:src/bio_observer/db/、tests/test_db_migrations.py、tests/test_db_constraints.py。
 
+**追記(2026-08-09、CodexレビューT-005対応)**
+- **原データの物理DELETE禁止**:media_asset はDELETE拒否トリガーで保護(削除は論理削除 deleted_at のみ)。**原本同一性フィールドの方針**:sha256 は登録後変更禁止(トリガーで拒否)。relative_path は保管先再編成時のみ変更可とする(同一性の根拠はハッシュであり、パスは可変)。その他のメタデータ列(コーデック・長さ等)は再取得での訂正を許容する。
+- **系譜整合の強制**:derived_asset の media_asset_id は analysis_run の media_asset_id と一致必須、derived_asset_detection が対応づける検出はその派生物を生成したRunの検出に限る(いずれもINSERT/UPDATEトリガーで拒否)。
+- **Review整合CHECK**:確認状態と判定内容の許容組合せをCHECK制約で強制(定義は SURVEY_METHOD.md 3.2.1)。属・科確認用に confirmed_taxon 列を追加。**SQLiteのCHECKはNULL評価で素通りするため、NULL安全な IS / COALESCE を使用する**(実装上の注意として明記)。
+- **時刻・範囲の整合CHECKの適用範囲**:共通タイムラインに直結する列(visual/audio_detection の開始・終了時刻とメディア内オフセット、reference_observation の時刻、media_asset.recording_started_at)にUTC ISO-8601形式(GLOB)・開始≦終了・非負オフセットのCHECKを付与。analysis_run/job_step の終端状態には finished_at 必須(failedはerrorも必須)。**迂回防止方針**:その他の時刻列(created_at等)はDB制約を課さず、書込は必ず `ids.utc_now_iso()`/`to_utc_iso()` ヘルパー経由とする(naive拒否)。生SQLでの直接書込はテスト・マイグレーションを除き禁止し、コードレビューで担保する。将来書込APIを実装する際(T-101以降)、時刻列への書込をヘルパーへ一元化する。
+- **DerivedAssetのsha256**:regeneration_state='present'(実体が存在)ではsha256必須(CHECK)。NULLを許すのは生成途中(regenerating)・削除済み(deleted_regenerable)・生成失敗のみ。
+
 ### D-24:Track特徴量はハイブリッド方式(主要検索項目=固定列、その他=バージョン付き構造化データ)
 - 日付:2026-08-09/決定者:Claude Code(T-004。先行成果品の分析に基づく)/Issue #4
 - 背景:先行成果品(Google Drive参考資料)のtrack_summary.csvは1トラック約35列の特徴量(直進性、面積変化率、Flow magnitude統計、動的Flow閾値、境界接触率、局所コントラスト等)を持ち、これらは手法改善に伴い**増減することが確実**。
