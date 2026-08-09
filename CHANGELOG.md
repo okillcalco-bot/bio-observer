@@ -1,5 +1,16 @@
 # 変更履歴(CHANGELOG.md)
 
+## 2026-08-09(T-003 リポジトリ初期化。Issue #2)
+
+- Pythonプロジェクト初期構成(src/bio_observer、pyproject.toml、Python 3.11固定、依存ピン留め+requirements-dev.lock)
+- STORAGE.md 追加(原データ/派生データ/モデル/DB/ログのディレクトリ方針)
+- .env.example 追加(保存場所・FFmpegパス・タイムゾーン。秘密情報・座標を含めない)
+- .gitignore 追加(動画・音声・モデル・DB・座標・秘密情報・ログを除外)
+- 環境確認:FFmpeg/FFprobe 6.1.1、環境確認テスト7件、`bio-observer-envcheck` CLI
+- 音声ライブラリ比較検証(D-13)→ 公式 birdnet 0.2.16 を採用(D-22)。BirdNET-Analyzer 2.4.0 はCustom Classifier学習・クロスチェック用の独立ツールと位置づけ
+- 制約:本検証環境ではモデル配布元への通信遮断により推論未検証(M1着手時にローカル解析機で実施)
+- 解析機能・DBスキーマ・UIは未実装(T-004以降)
+
 ## 2026-08-09(T-002再レビュー承認・最終更新)
 
 - Codex再レビュー結果:前回指摘すべて反映済み・重大な矛盾なし・実装開始可・PR #1承認

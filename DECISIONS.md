@@ -76,6 +76,41 @@
 - 理由:birdnetlibはサードパーティ製であり、公式ラインの保守状況を確認した上で選定すべきため。
 - 反映:ARCHITECTURE.md 第2・4・8章、TASKS.md T-003。
 
+### D-22:音声解析ライブラリは公式 birdnet Python library を採用する(T-003比較検証の結果)
+- 日付:2026-08-09/決定者:Claude Code(T-003。D-13の比較方針に基づく)/Issue #2
+- 比較対象とバージョン:公式 `birdnet` 0.2.16(PyPI)/`birdnet-analyzer` 2.4.0(PyPI)。いずれもBirdNETチーム(Stefan Taubert / Stefan Kahl)によるMITライセンス
+- 検証環境:Python 3.11.15、Linux(Claude Codeリモート実行環境)、pip 24.0
+
+**比較結果**
+
+| 観点 | birdnet 0.2.16 | birdnet-analyzer 2.4.0 |
+|---|---|---|
+| 位置づけ | パイプライン組み込み用の公式ライブラリ | CLI/GUIを持つ公式アプリケーション |
+| API | `birdnet.load("acoustic", "2.4", "tf")` → `AcousticPredictionSession` によるプログラマブルAPI。Perch v2対応(`load_perch_v2`) | `python -m birdnet_analyzer.analyze` のCLI実行が基本(モジュール:analyze/train/embeddings/segments/gui等) |
+| Custom Classifier | **実行**:`birdnet.load_custom(...)` で対応 | **学習**:`birdnet_analyzer.train` で対応 |
+| 依存規模 | 51パッケージ・約2.6GB(TensorFlow含む)。ai-edge-litert対応 | 68パッケージ・約2.8GB(TensorFlow、librosa、matplotlib等) |
+| インストール | `pip install birdnet==0.2.16` 成功 | `pip install birdnet-analyzer==2.4.0` 成功 |
+| モデル | BirdNET v2.4(共通)。初回実行時に zenodo.org から自動取得 | BirdNET v2.4(共通)。初回実行時に tuc.cloud から自動取得 |
+| 推論精度 | 同一モデル(v2.4)のため理論上同等 | 同上 |
+
+**決定**
+- 解析パイプライン(M1/T-103)への組み込みは **公式 `birdnet` 0.2.16** を採用する(pyproject.toml の optional-dependencies `audio` にピン留め)
+- **BirdNET-Analyzer はアプリの実行時依存にはしない。** Custom Classifier の学習(M4/T-403)と結果のクロスチェック用の独立ツールとして利用する
+- 採用理由:(1) セッション型のプログラマブルAPIでAnalysisRun記録・JobStep再開と整合させやすい、(2) `load_custom` により将来のCustom Classifier実行に対応(D-13の要件)、(3) 依存がやや軽く、アプリからのサブプロセスCLI呼び出しよりエラー処理・進捗取得が確実、(4) 同一チームの公式ライブラリでモデルは共通のため精度差がない
+
+**実行方法(記録)**
+```bash
+pip install "bio-observer[audio] @ ."   # または pip install birdnet==0.2.16
+python -c "
+import birdnet, pathlib
+model = birdnet.load('acoustic', '2.4', 'tf')      # 初回はモデル自動ダウンロード
+with birdnet.AcousticPredictionSession(model) as s:
+    result = s.predict(pathlib.Path('sample.wav'))
+"
+```
+
+**制約(重要)**:本検証環境ではモデル配布元(zenodo.org / tuc.cloud)への通信が組織のegressポリシーで遮断されており(プロキシ403)、**推論実行までは未検証**。インストール・API検証・依存関係までを確認済み。推論のスモークテスト(モデルダウンロード+合成WAVでの実行+処理速度計測)は、実際の解析を行うローカルマシンでM1着手時に必ず実施し、結果を本文書へ追記すること。速度・精度に問題が出た場合は本決定を見直す(その場合も本エントリは上書きせず追記で改訂する)。
+
 ---
 
 ## 旧・判断待ち事項の決定(P-1〜P-8 → D-14〜D-21)
