@@ -16,6 +16,7 @@ from bio_observer.media_registry import (
     CopyVerificationError,
     DuplicateMediaError,
     InsufficientSpaceError,
+    PathCollisionError,
     ProbeError,
     compute_sha256,
     probe_media,
@@ -176,11 +177,11 @@ def test_confirmed_certainty_requires_human_basis(db, seed, storage, sample_vide
     assert tuple(row) == ("manual", "confirmed")
 
 
-def test_cleanup_when_atomic_rename_fails(db, seed, storage, sample_video, monkeypatch):
-    """rename失敗時にDB行・一時ファイル・確定ファイルを残さない。"""
-    def boom(src, dst):
-        raise OSError("simulated rename failure")
-    monkeypatch.setattr(media_registry.os, "replace", boom)
+def test_cleanup_when_finalize_fails(db, seed, storage, sample_video, monkeypatch):
+    """確定処理失敗時にDB行・一時ファイル・確定ファイルを残さない。"""
+    def boom(part, final):
+        raise OSError("simulated finalize failure")
+    monkeypatch.setattr(media_registry, "_finalize_exclusive", boom)
     sha = compute_sha256(sample_video)
     with pytest.raises(OSError):
         register_media(db, sample_video, seed["session"], storage=storage)
@@ -188,6 +189,74 @@ def test_cleanup_when_atomic_rename_fails(db, seed, storage, sample_video, monke
                           (sha,)).fetchone()
     assert count == 0
     assert _leftover_files(storage) == []
+
+
+def _fixed_media_id(monkeypatch, media_id: str):
+    """new_id('med')だけを固定IDへ差し替える(他のプレフィックスは素通し)。"""
+    real_new_id = media_registry.new_id
+
+    def fake(prefix):
+        return media_id if prefix == "med" else real_new_id(prefix)
+
+    monkeypatch.setattr(media_registry, "new_id", fake)
+
+
+def test_id_collision_never_touches_existing_row_or_files(
+        db, seed, storage, sample_video, monkeypatch):
+    """ID衝突でDB INSERTが失敗しても、既存行・既存ファイルへ一切触れない。"""
+    _fixed_media_id(monkeypatch, seed["media"])  # 既存MediaAssetの主キーと衝突させる
+    before_row = dict(db.execute("SELECT * FROM media_asset WHERE id = ?",
+                                 (seed["media"],)).fetchone())
+    with pytest.raises(sqlite3.IntegrityError):
+        register_media(db, sample_video, seed["session"], storage=storage)
+    after_row = dict(db.execute("SELECT * FROM media_asset WHERE id = ?",
+                                (seed["media"],)).fetchone())
+    assert after_row == before_row  # 既存行は無傷
+    assert _leftover_files(storage) == []  # 本呼出しが作ったファイルも残っていない
+
+
+def test_existing_final_file_not_overwritten_or_deleted(
+        db, seed, storage, sample_video, monkeypatch):
+    """確定先に既存ファイルがある場合、上書き・削除せず登録を失敗させる。"""
+    _fixed_media_id(monkeypatch, "med_collision0000000000000000000")
+    dest = (storage.originals_dir / seed["project"] / seed["site"]
+            / seed["station"] / seed["session"]
+            / "med_collision0000000000000000000.mp4")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    sentinel = b"existing original asset - must not change"
+    dest.write_bytes(sentinel)
+
+    (rows_before,) = db.execute("SELECT COUNT(*) FROM media_asset").fetchone()
+    with pytest.raises(PathCollisionError):
+        register_media(db, sample_video, seed["session"], storage=storage)
+    assert dest.read_bytes() == sentinel  # 内容・存在とも無傷
+    (rows_after,) = db.execute("SELECT COUNT(*) FROM media_asset").fetchone()
+    assert rows_after == rows_before
+    assert [p for p in _leftover_files(storage) if p != dest] == []
+
+
+def test_finalize_is_exclusive_even_after_preflight(
+        db, seed, storage, sample_video, monkeypatch):
+    """事前確認をすり抜けても、確定処理自体が既存ファイルを上書きしない(排他的作成)。"""
+    _fixed_media_id(monkeypatch, "med_collision1111111111111111111")
+    dest = (storage.originals_dir / seed["project"] / seed["site"]
+            / seed["station"] / seed["session"]
+            / "med_collision1111111111111111111.mp4")
+    sentinel = b"late-arriving existing asset"
+
+    # 事前確認の後・確定の直前に既存ファイルが現れる状況(TOCTOU)を再現
+    real_copy = media_registry._copy_with_hash
+
+    def copy_then_plant(source, part):
+        digest = real_copy(source, part)
+        dest.write_bytes(sentinel)
+        return digest
+
+    monkeypatch.setattr(media_registry, "_copy_with_hash", copy_then_plant)
+    with pytest.raises(PathCollisionError):
+        register_media(db, sample_video, seed["session"], storage=storage)
+    assert dest.read_bytes() == sentinel  # os.linkの排他的作成により無傷
+    assert [p for p in _leftover_files(storage) if p != dest] == []
 
 
 def test_unknown_session_rejected_before_copy(db, storage, sample_video):

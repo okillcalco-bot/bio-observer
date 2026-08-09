@@ -20,7 +20,7 @@
 
 | ID | タスク | 内容 | 担当 | 状態 |
 |---|---|---|---|---|
-| T-101 | メディア登録 | 動画・音声取込(media_registry)、ストリーミングSHA-256+二重登録防止、FFprobeメタデータ、一時ファイル→照合→atomic rename、失敗時クリーンアップ、撮影開始日時の確実性ポリシー(D-26)。テスト11件(MVP要件1-3) | Claude Code | 実装完了・Codexレビュー待ち(Issue #7、PR作成済み) |
+| T-101 | メディア登録 | 動画・音声取込(media_registry)、ストリーミングSHA-256+二重登録防止、FFprobeメタデータ、一時ファイル→照合→atomic rename、失敗時クリーンアップ、既存資産の不可侵・排他的確定、撮影開始日時の確実性ポリシー(D-26)。テスト14件(MVP要件1-3) | Claude Code | 実装完了・Codexレビュー待ち(Issue #7、PR作成済み) |
 | T-102 | 音声抽出 | FFmpegで全時間抽出(無劣化優先)(MVP要件4) | Claude Code | 未着手 |
 | T-103 | 音声イベント検出+BirdNET解析 | SED(種分類と独立。D-7)+全時間種分類、AudioDetection保存、AnalysisRun記録(MVP要件5,14)。ライブラリはT-003の決定に従う(D-13) | Claude Code | 未着手 |
 | T-104 | クリップ/スペクトログラム生成 | 前後マージンつき(MVP要件6)。DerivedAssetとして登録(D-9) | Claude Code | 未着手 |

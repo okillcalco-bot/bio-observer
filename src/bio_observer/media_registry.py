@@ -56,6 +56,10 @@ class CopyVerificationError(MediaRegistrationError):
     """コピー後のハッシュ・サイズ照合の不一致。"""
 
 
+class PathCollisionError(MediaRegistrationError):
+    """保存先パスが既存ファイルと衝突。既存ファイルには一切触れずに失敗する。"""
+
+
 @dataclass(frozen=True)
 class MediaMetadata:
     media_type: str  # 'video' | 'audio'
@@ -159,6 +163,27 @@ def _session_chain(conn: sqlite3.Connection, survey_session_id: str) -> tuple[st
     return row["project_id"], row["site_id"], row["station_id"]
 
 
+def _finalize_exclusive(part: Path, final: Path) -> None:
+    """一時ファイルを確定パスへ、既存ファイルを上書きせず原子的に確定する。
+
+    同一ディレクトリ内で os.link により確定名を排他的に作成する(既存があれば
+    FileExistsError となり、既存ファイルは変更されない)。成功後に一時ファイルを
+    削除する。ハードリンク非対応のファイルシステム(exFAT等)では、存在確認の上で
+    os.replace へフォールバックする(この場合のみ確認と確定の間にTOCTOU窓が残る。
+    限界としてD-26に記録)。
+    """
+    try:
+        os.link(part, final)
+    except FileExistsError:
+        raise PathCollisionError(f"確定先が既に存在します(既存ファイルは変更しません): {final.name}")
+    except OSError:
+        if final.exists():
+            raise PathCollisionError(f"確定先が既に存在します(既存ファイルは変更しません): {final.name}")
+        os.replace(part, final)
+        return
+    part.unlink()
+
+
 def _validate_recording_start(
     basis: str | None, certainty: str | None
 ) -> None:
@@ -185,9 +210,16 @@ def register_media(
 
     - 原本(source)は読み取りのみ。上書き・削除・再エンコードしない
     - 保存先パスは不透明IDのみで構成(元ファイル名を使わない)
+    - 既存ファイルとの衝突時は、既存ファイルに一切触れず失敗する。例外時に
+      削除するのは本呼出しが作成したファイルのみ(D-26)
     - 撮影開始日時が未指定の場合、ファイル更新時刻から basis='file_time'・
       certainty='estimated' として推定する(確定として自動断定しない。D-26)
     - 失敗時はDB行・コピー先ファイルを残さない
+
+    トランザクション契約:本関数は接続のトランザクション所有者として振る舞い、
+    成功時に conn.commit()、失敗時に conn.rollback() を接続全体へ発行する。
+    呼び出し側の未確定変更と同一トランザクションで合成しないこと(合成が必要に
+    なった場合はSAVEPOINT化を検討する。D-26)。
     """
     source = Path(source)
     metadata = probe_media(source, ffprobe=storage.ffprobe)
@@ -217,6 +249,12 @@ def register_media(
     dest_part = dest_final.with_suffix(dest_final.suffix + _PART_SUFFIX)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
+    # 既存資産との衝突は、既存ファイルへ一切触れずに失敗させる(原則3)
+    if dest_final.exists():
+        raise PathCollisionError(f"確定先が既に存在します(既存ファイルは変更しません): {dest_final.name}")
+    if dest_part.exists():
+        raise PathCollisionError(f"一時ファイルが既に存在します(変更しません): {dest_part.name}")
+
     # 空き容量の事前確認(原本サイズ+余裕1%)
     source_size = source.stat().st_size
     free = shutil.disk_usage(dest_dir).free
@@ -225,6 +263,7 @@ def register_media(
             f"空き容量不足: 必要 {source_size} bytes / 空き {free} bytes"
         )
 
+    finalized = False
     try:
         # 1パス目:コピーしながら原本のハッシュを計算
         sha256 = _copy_with_hash(source, dest_part)
@@ -259,12 +298,15 @@ def register_media(
              recording_start_basis, recording_start_certainty,
              tz or storage.tz, note, now, now),
         )
-        os.replace(dest_part, dest_final)  # atomic rename
+        _finalize_exclusive(dest_part, dest_final)  # 既存を上書きしない原子的確定
+        finalized = True
         conn.commit()
     except BaseException:
         conn.rollback()
+        # 削除するのは本呼出しが作成したファイルのみ(既存資産へは触れない)
         dest_part.unlink(missing_ok=True)
-        dest_final.unlink(missing_ok=True)
+        if finalized:
+            dest_final.unlink(missing_ok=True)
         raise
 
     return RegistrationResult(
