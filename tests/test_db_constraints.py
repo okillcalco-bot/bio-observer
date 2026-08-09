@@ -255,6 +255,41 @@ def test_derived_asset_lineage_mismatch_rejected(db, seed):
                derived_asset_id=asset2, audio_detection_id=det)
 
 
+def test_lineage_ids_immutable_after_creation(db, seed):
+    """系譜ID(Runのメディア、検出のRun)は作成後変更禁止(親側更新の抜け道防止)。"""
+    med2, run2 = _second_media_and_run(db, seed)
+    # 派生物を正常に関連付けた状態を作る
+    det = insert(db, "visual_detection", id=new_id("vdet"), analysis_run_id=seed["run"],
+                 started_at="2026-08-01T10:00:00Z", ended_at="2026-08-01T10:00:05Z",
+                 media_start_offset_s=0, media_end_offset_s=5)
+    asset = insert(db, "derived_asset", id=new_id("dast"), asset_type="video_clip",
+                   media_asset_id=seed["media"], analysis_run_id=seed["run"],
+                   relative_path="derived/clips/lineage.mp4", sha256="e" * 64)
+    insert(db, "derived_asset_detection", id=new_id("dmem"),
+           derived_asset_id=asset, visual_detection_id=det, role="primary")
+    # DerivedAsset作成後もRunのmedia_asset_idは変更できない
+    with pytest.raises(sqlite3.DatabaseError, match="immutable"):
+        db.execute("UPDATE analysis_run SET media_asset_id = ? WHERE id = ?",
+                   (med2, seed["run"]))
+    # DerivedAssetDetection作成後もDetectionのanalysis_run_idは変更できない
+    with pytest.raises(sqlite3.DatabaseError, match="immutable"):
+        db.execute("UPDATE visual_detection SET analysis_run_id = ? WHERE id = ?",
+                   (run2, det))
+    # 音声検出も同様
+    adet = insert(db, "audio_detection", id=new_id("adet"), analysis_run_id=seed["run"],
+                  started_at="2026-08-01T10:01:00Z", ended_at="2026-08-01T10:01:03Z",
+                  media_start_offset_s=60, media_end_offset_s=63,
+                  detection_source="sed", raw_model_outputs_json="[]")
+    with pytest.raises(sqlite3.DatabaseError, match="immutable"):
+        db.execute("UPDATE audio_detection SET analysis_run_id = ? WHERE id = ?",
+                   (run2, adet))
+    # 同じ値でのUPDATEは許可される
+    db.execute("UPDATE analysis_run SET media_asset_id = ? WHERE id = ?",
+               (seed["media"], seed["run"]))
+    db.execute("UPDATE visual_detection SET analysis_run_id = ? WHERE id = ?",
+               (seed["run"], det))
+
+
 def test_derived_asset_present_requires_sha256(db, seed):
     with pytest.raises(sqlite3.IntegrityError):
         insert(db, "derived_asset", id=new_id("dast"), asset_type="video_clip",

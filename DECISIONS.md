@@ -140,6 +140,7 @@ with birdnet.AcousticPredictionSession(model) as s:
 - **Review整合CHECK**:確認状態と判定内容の許容組合せをCHECK制約で強制(定義は SURVEY_METHOD.md 3.2.1)。属・科確認用に confirmed_taxon 列を追加。**SQLiteのCHECKはNULL評価で素通りするため、NULL安全な IS / COALESCE を使用する**(実装上の注意として明記)。
 - **時刻・範囲の整合CHECKの適用範囲**:共通タイムラインに直結する列(visual/audio_detection の開始・終了時刻とメディア内オフセット、reference_observation の時刻、media_asset.recording_started_at)にUTC ISO-8601形式(GLOB)・開始≦終了・非負オフセットのCHECKを付与。analysis_run/job_step の終端状態には finished_at 必須(failedはerrorも必須)。**迂回防止方針**:その他の時刻列(created_at等)はDB制約を課さず、書込は必ず `ids.utc_now_iso()`/`to_utc_iso()` ヘルパー経由とする(naive拒否)。生SQLでの直接書込はテスト・マイグレーションを除き禁止し、コードレビューで担保する。将来書込APIを実装する際(T-101以降)、時刻列への書込をヘルパーへ一元化する。
 - **DerivedAssetのsha256**:regeneration_state='present'(実体が存在)ではsha256必須(CHECK)。NULLを許すのは生成途中(regenerating)・削除済み(deleted_regenerable)・生成失敗のみ。
+- **Run/Detectionの系譜IDは作成後変更禁止**(T-005再レビュー指摘対応):`analysis_run.media_asset_id`、`visual_detection.analysis_run_id`、`audio_detection.analysis_run_id` は作成後イミュータブル(トリガーで変更拒否。同値UPDATEは許可)。関連付け後に親側のIDを差し替えて系譜整合トリガーを迂回する抜け道を塞ぐ。
 
 ### D-24:Track特徴量はハイブリッド方式(主要検索項目=固定列、その他=バージョン付き構造化データ)
 - 日付:2026-08-09/決定者:Claude Code(T-004。先行成果品の分析に基づく)/Issue #4

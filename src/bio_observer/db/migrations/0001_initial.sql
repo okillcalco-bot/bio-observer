@@ -213,6 +213,14 @@ BEGIN
     SELECT RAISE(ABORT, 'analysis_run must not be deleted (D-10)');
 END;
 
+-- 系譜IDは作成後変更禁止(親側更新による系譜破壊の防止。D-23)
+CREATE TRIGGER trg_analysis_run_media_immutable
+BEFORE UPDATE OF media_asset_id ON analysis_run
+WHEN OLD.media_asset_id <> NEW.media_asset_id
+BEGIN
+    SELECT RAISE(ABORT, 'analysis_run.media_asset_id is immutable (lineage protection, D-23)');
+END;
+
 CREATE TABLE job_step (
     id TEXT PRIMARY KEY,
     analysis_run_id TEXT NOT NULL REFERENCES analysis_run(id),
@@ -305,6 +313,14 @@ CREATE TABLE visual_detection (
 CREATE INDEX idx_visual_detection_run ON visual_detection(analysis_run_id);
 CREATE INDEX idx_visual_detection_time ON visual_detection(started_at);
 
+-- 系譜IDは作成後変更禁止(D-23)
+CREATE TRIGGER trg_visual_detection_run_immutable
+BEFORE UPDATE OF analysis_run_id ON visual_detection
+WHEN OLD.analysis_run_id <> NEW.analysis_run_id
+BEGIN
+    SELECT RAISE(ABORT, 'visual_detection.analysis_run_id is immutable (lineage protection, D-23)');
+END;
+
 CREATE TABLE audio_detection (
     id TEXT PRIMARY KEY,
     analysis_run_id TEXT NOT NULL REFERENCES analysis_run(id),
@@ -338,6 +354,14 @@ CREATE TABLE audio_detection (
 );
 CREATE INDEX idx_audio_detection_run ON audio_detection(analysis_run_id);
 CREATE INDEX idx_audio_detection_time ON audio_detection(started_at);
+
+-- 系譜IDは作成後変更禁止(D-23)
+CREATE TRIGGER trg_audio_detection_run_immutable
+BEFORE UPDATE OF analysis_run_id ON audio_detection
+WHEN OLD.analysis_run_id <> NEW.analysis_run_id
+BEGIN
+    SELECT RAISE(ABORT, 'audio_detection.analysis_run_id is immutable (lineage protection, D-23)');
+END;
 
 -- ============ 人による確認(追記専用。D-1) ============
 

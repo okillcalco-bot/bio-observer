@@ -1,5 +1,10 @@
 # 変更履歴(CHANGELOG.md)
 
+## 2026-08-09(T-005再レビュー指摘対応:系譜IDのイミュータブル化)
+
+- analysis_run.media_asset_id / visual_detection.analysis_run_id / audio_detection.analysis_run_id を作成後変更禁止に(トリガー。同値UPDATEは許可)。親側更新による系譜整合の迂回を防止(D-23追記)
+- 回帰テスト1件追加(全34件パス)
+
 ## 2026-08-09(追加要件登録:Google Drive自動取込 T-110)
 
 - Google Drive受け箱による自動取込・結果返却を承認済み追加要件として登録(Issue #6、着手はT-101完了後・独立PR)
