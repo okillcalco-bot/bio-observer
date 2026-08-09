@@ -7,7 +7,18 @@
 
 ## 現在の状態
 
-フェーズ1(音声パイプライン)。T-101はCodex承認を経てPR #8でmainへマージ済み(Issue #7クローズ、main: 96d810e)。T-110(Google Drive自動取込)を実装完了し、Codexレビュー待ち(Issue #6、ブランチ claude/t110-drive-ingest)。音声抽出(T-102)・BirdNET/SED(T-103)・映像検出・UIは未実装。
+フェーズ1(音声パイプライン)。T-110はCodex承認を経てPR #9でmainへマージ済み(Issue #6クローズ、main: a993260)。T-111(取込CLI)を実装完了し、Codexレビュー待ち(Issue #10、ブランチ claude/t111-ingest-cli)。マージ後にWindows解析PCで実Drive E2E(docs/WINDOWS_E2E.md)を実施予定。音声抽出(T-102)・BirdNET/SED(T-103)・映像検出・UIは未実装。
+
+## T-111実装の要点(レビュー観点)
+
+- `bio_observer.cli`(argparse。console script `bio-observer`):migrate/setup/check-config/run/status(D-28)
+- setup:名前ベースのget-or-create(再実行で同じIDを再利用)。位置は丸め表現のみ入力可(正確な座標の入力欄なし)
+- check-config:OAuth認可前にDrive未接続で検査(.env必須4項目・DATA_ROOT書込・FFmpeg/FFprobe・DB)。フォルダIDは先頭4文字のみマスク表示、OAuth情報は存在確認のみ
+- run:--once/--interval(Ctrl+C安全停止=全遷移コミット済み)/--dry-run(worker.plan_inboxでDrive・DBとも無変更)。単一ワーカー排他ロック(msvcrt/fcntl、`<DATA_ROOT>/ingest.lock`)
+- T-110の状態機械・再試行・安定確認・冪等性は無変更で再利用(worker.pyへの追加はplan_inboxとロックのみ)
+- Windows考慮:コンソールUTF-8化(cp932対策)、msvcrtロック、pathlib
+- レビュー対応(D-28追記):dry-run/statusは読み取り専用接続(mode=ro)でDB作成・migrationも行わない。非dry-runは設定確認直後・DB/OAuth前にロック取得(後発はDB・token不接触)。--intervalは1以上のみ
+- テスト14件(Fake Drive・一時DB・合成メディアのみ):migrate冪等/setup再利用/check-config OK・マスク・欠落NG/run --once E2E/dry-run無変更(DL・フォルダ作成・ジョブ作成なし)/不明セッション拒否/二重起動拒否と解放後の起動/Ctrl+C正常終了+ロック解放/status空表示/DB未初期化のdry-run・statusがDBを作らない/ロックが DB・OAuthより先/interval入力制約
 
 ## T-110実装の要点(レビュー観点)
 
@@ -46,8 +57,8 @@
 
 ## 未完了のこと
 
-- T-110 PRのCodexレビュー・マージ
-- T-110実機E2Eスモークテスト(Windows解析PC。上記申し送り参照)
+- T-111 PRのCodexレビュー・マージ
+- T-110実機E2Eスモークテスト(Windows解析PC。docs/WINDOWS_E2E.md の手順・チェックリスト)
 - T-102以降(音声抽出、BirdNET/SED、クリップ生成、UI、CSV出力)
 - リモート環境からのマージ済みブランチ削除(ref削除権限403。GitHub上で手動削除)
 - 短尺動画はDrive受け箱にあり、リポジトリへはコミットしない
@@ -60,9 +71,9 @@
 
 ## 次に行うべきこと
 
-1. Codex:T-110 PRのレビュー(状態機械・再開性・二重解析防止・Drive読み取り専用の確認)
-2. 調査責任者:T-110 PRのマージ判断
-3. マージ後:Windows解析PCでの実機E2Eスモークテスト(IMG_3355/3356.MOV)、並行してClaude CodeがT-102 音声抽出へ着手
+1. Codex:T-111 PRのレビュー(dry-runの読み取り専用保証・排他ロック・秘密情報マスクの確認)
+2. 調査責任者:T-111 PRのマージ判断
+3. マージ後:Windows解析PCでの実機E2E(docs/WINDOWS_E2E.md のチェックリスト8項目)、並行してClaude CodeがT-102 音声抽出へ着手
 
 ## T-101実装の要点(レビュー観点)
 
@@ -91,7 +102,7 @@
 
 ## 実行したテスト/テスト結果
 
-- `pytest`:68件すべてパス(環境確認7件+DB27件+メディア登録19件+Drive取込15件)
+- `pytest`:82件すべてパス(環境確認7件+DB27件+メディア登録19件+Drive取込15件+CLI14件)
 - DBテスト内訳:空DBへの最新スキーマ構築/1バージョンずつの段階的マイグレーション/再実行の冪等性/外部キー有効化・integrity_check/正確座標列の不存在検査/不透明IDポリシー/UTCヘルパー/FK違反拒否/一意制約/enum CHECK拒否/SED由来・種候補なしAudioDetection保存/統合後の生スコア保持/ReferenceObservation精査情報+二重確認CHECK/review追記専用/analysis_run完了後凍結/run_event・access_log追記専用/DetectionLink確定に人の記録必須
 - `bio-observer-envcheck`:すべてOK(Python 3.11.15 / ffmpeg 6.1.1 / ffprobe 6.1.1 / 設定読み込み)
 - ライブラリ比較:birdnet 0.2.16・birdnet-analyzer 2.4.0のインストール・API検証(詳細はD-22)。推論は未実施(T-103申し送り)
@@ -103,8 +114,8 @@
 
 ## 関連コミット
 
-- 設計:PR #1(main: 24c56d2)/T-003:PR #3(main: 5014c90)/T-004:PR #5(main: 80c506d)/T-101:PR #8(main: 96d810e)
-- T-110:本ブランチ claude/t110-drive-ingest(Issue #6)
+- 設計:PR #1/T-003:PR #3/T-004:PR #5/T-101:PR #8/T-110:PR #9(main: a993260)
+- T-111:本ブランチ claude/t111-ingest-cli(Issue #10)
 
 ## 変更してはいけない事項
 

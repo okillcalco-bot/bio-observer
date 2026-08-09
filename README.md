@@ -34,6 +34,21 @@ conn = connect("path/to/bio_observer.sqlite3")  # 外部キー制約を強制有
 migrate(conn)                                   # 未適用マイグレーションを適用
 ```
 
+## 取込CLI(T-111時点)
+
+Google Drive受け箱からの自動取込をコマンドで実行できる(Windows手順の詳細は [docs/WINDOWS_E2E.md](docs/WINDOWS_E2E.md))。
+
+```bash
+bio-observer check-config       # OAuth認可前の設定検査(Drive未接続)
+bio-observer migrate            # DB初期化
+bio-observer setup --project P --site A --station ST-1 --survey-date 2026-08-09
+bio-observer run --session ses_xxx --once --dry-run   # 一覧確認(Drive・DB無変更)
+bio-observer run --session ses_xxx --interval 300     # 継続実行(Ctrl+Cで安全停止)
+bio-observer status             # ジョブ一覧・最終エラー
+```
+
+同一DATA_ROOTで同時に実行できるワーカーは1プロセスのみ(排他ロック)。
+
 ## セットアップ(T-003時点)
 
 前提:Python 3.11、FFmpeg/FFprobe(6.x で確認済み)
