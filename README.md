@@ -21,4 +21,4 @@ AIは「候補」を提示するのみで、種・行動の確定は常に調査
 
 Claude Code・Codexは作業開始前に PROJECT_CHARTER.md・AI_HANDOFF.md・TASKS.md を確認すること。
 
-`bio-observer-firebase.html` / `bio-observer-research.html` は設計以前のプロトタイプ(扱いは DECISIONS.md P-8 参照)。
+`archive/prototypes/` 配下のHTMLは設計以前のプロトタイプ(参考資料。DECISIONS.md D-21 参照)。
