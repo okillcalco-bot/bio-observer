@@ -19,7 +19,7 @@
 ```
 <DATA_ROOT>/
   originals/            # 原データ(元動画・元音声)。取込後は変更・削除しない
-    <project>/<site>/<station>/<survey_session>/   # 登録時に規則的に配置
+    <project_id>/<site_id>/<station_id>/<survey_session_id>/   # 不透明IDのみで構成
   derived/              # 派生データ(DerivedAsset)。すべて再生成可能性を管理
     proxies/            # 低解像度プロキシ(UI確認用。D-8)
     audio/              # 抽出WAV・音声クリップ
@@ -33,6 +33,7 @@
 
 - 各サブディレクトリは `.env` の個別変数で上書き可能(外付けHDDへ originals だけ置く等)。
 - `derived/` 配下の実ファイルは必ず DerivedAsset レコード(系譜・ハッシュ・生成条件)とセットで作成する(D-9)。
+- **ディレクトリ名・ファイル名にはDB上の不透明ID(連番・UUID等)のみを使い、地点名・希少種名等の表示名を使用しない**(SECURITY.md:パスからの場所・種の特定を防ぐ。表示名との対応はDBが持つ)。
 
 ## 3. バックアップ(D-16)
 

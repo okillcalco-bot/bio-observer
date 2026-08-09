@@ -1,5 +1,15 @@
 # 変更履歴(CHANGELOG.md)
 
+## 2026-08-09(PR #3 Codexレビュー対応)
+
+- THIRD_PARTY_LICENSES.md 新規作成。BirdNETのライセンス表記を修正(コード:MIT/学習済みモデル:CC BY-NC-SA 4.0。研究・技術検証前提、商用利用前の権利者確認を必須化)。D-22・READMEにも反映
+- 依存固定の状態を正確化(requirements-dev.lockは開発依存のみ、birdnet本体0.2.16固定、推移依存は未固定。ローカル推論成功後にaudio lockを生成する申し送り)
+- D-22のインストール例を `pip install ".[audio]"` へ修正
+- モデルがBIO_OBSERVER_MODELS_DIRへ自動保存されるという未確認記述を削除(保存先・形式・バージョン・SHA-256・オフライン再利用・キャッシュ固定可否はT-103で確定)
+- 「同一モデルなので精度は同等」の断定を撤回(同一モデル系列だが出力一致は未検証、へ修正)
+- STORAGE.mdの原データ保存パスを不透明ID方式へ変更(originals/<project_id>/<site_id>/<station_id>/<survey_session_id>/。地点名・希少種名をパスに使わない)
+- AI_HANDOFF.mdへT-103時の申し送り5項目を追加(推論スモークテスト/audio lock生成/libsndfile確認/モデル保存先・ハッシュ確認/商用利用前ライセンス確認)
+
 ## 2026-08-09(T-003 リポジトリ初期化。Issue #2)
 
 - Pythonプロジェクト初期構成(src/bio_observer、pyproject.toml、Python 3.11固定、依存ピン留め+requirements-dev.lock)

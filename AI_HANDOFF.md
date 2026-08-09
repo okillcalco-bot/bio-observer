@@ -25,8 +25,13 @@
 ## 未完了のこと
 
 - T-003 PRのレビュー・マージ
-- **birdnet推論のスモークテスト**:本検証環境ではモデル配布元(zenodo.org / tuc.cloud)がegressポリシーで遮断され未実施。**M1着手時にローカル解析機で必ず実施し、結果をDECISIONS.md D-22へ追記すること**
 - T-004以降すべて(DBスキーマ、解析パイプライン、UI)
+- **M1着手時(T-103)にローカル解析機で必ず実施する申し送り事項**(結果はDECISIONS.md D-22とTHIRD_PARTY_LICENSES.mdへ追記):
+  1. **ローカル推論スモークテスト**:モデルダウンロード+合成WAVでの推論実行+処理速度計測(本検証環境ではモデル配布元 zenodo.org / tuc.cloud がegressポリシーで遮断され未実施)
+  2. **audio推移依存のlock生成**:推論成功後に `pip freeze` でaudio依存を含むlock(`requirements-audio.lock`)を生成する(現状 `requirements-dev.lock` は開発依存のみ。birdnet本体は0.2.16固定だが推移依存は未固定)
+  3. **libsndfile確認**:soundfileが依存するネイティブライブラリ libsndfile の存在・バージョンを対象環境で確認する
+  4. **モデル保存先・ハッシュ確認**:モデルの保存先・形式・バージョン・SHA-256・オフライン再利用方法を確定し、モデルキャッシュを `BIO_OBSERVER_MODELS_DIR` 等の管理対象ディレクトリへ固定できるか検証する
+  5. **商用利用前のライセンス確認**:BirdNETモデルはCC BY-NC-SA 4.0(非商用条件)。有償調査・解析サービス・商品化での利用前に権利者確認を必須とする(THIRD_PARTY_LICENSES.md)
 
 ## 次に行うべきこと
 
