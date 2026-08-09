@@ -1,0 +1,176 @@
+"""主要制約のテスト(外部キー/一意制約/enum/追記専用/生スコア保持/精査情報)。"""
+
+import json
+
+import pytest
+import sqlite3
+
+from bio_observer.db.ids import new_id
+from conftest import insert
+
+
+def test_foreign_key_violation_rejected(db):
+    with pytest.raises(sqlite3.IntegrityError):
+        insert(db, "station", id=new_id("stn"), site_id="site_deadbeef",
+               name="孤立ステーション", equipment_type="camera")
+
+
+def test_unique_constraint(db, seed):
+    with pytest.raises(sqlite3.IntegrityError):
+        insert(db, "media_asset", id=new_id("med"),
+               survey_session_id=seed["session"], media_type="video",
+               relative_path=db.execute(
+                   "SELECT relative_path FROM media_asset WHERE id = ?",
+                   (seed["media"],)).fetchone()["relative_path"],
+               sha256="1" * 64)
+    db.rollback()
+    with pytest.raises(sqlite3.IntegrityError):
+        insert(db, "species", id=new_id("sp"), scientific_name="Testus dummius")
+
+
+def test_enum_check_rejected(db, seed):
+    with pytest.raises(sqlite3.IntegrityError):
+        insert(db, "analysis_run", id=new_id("run"),
+               media_asset_id=seed["media"], analysis_type="telepathy")
+
+
+def test_sed_only_audio_detection_without_species(db, seed):
+    """SED由来・種候補なしの音声検出を保存できる(D-7)。"""
+    det_id = insert(
+        db, "audio_detection", id=new_id("adet"), analysis_run_id=seed["run"],
+        started_at="2026-08-01T00:10:00Z", ended_at="2026-08-01T00:10:03Z",
+        media_start_offset_s=600.0, media_end_offset_s=603.0,
+        detection_source="sed",
+        species_candidates_json=None, top_confidence=None,
+        is_unknown_sound=1,
+        raw_model_outputs_json=json.dumps([
+            {"model": "sed-energy", "model_version": "0.1", "raw_score": 0.83,
+             "evidence": "band-energy onset"},
+        ]),
+    )
+    row = db.execute("SELECT * FROM audio_detection WHERE id = ?", (det_id,)).fetchone()
+    assert row["species_candidates_json"] is None
+    assert row["detection_source"] == "sed"
+
+
+def test_merged_detection_keeps_raw_model_outputs(db, seed):
+    """統合後もSED・BirdNET双方の生スコア・モデル情報を保持できる(DATA_MODEL.md 3.8)。"""
+    raw = [
+        {"model": "sed-energy", "model_version": "0.1", "raw_score": 0.91,
+         "evidence": "onset+band"},
+        {"model": "birdnet", "model_version": "0.2.16 (v2.4)",
+         "raw_scores": {"Testus dummius": 0.42, "Alterus avius": 0.11},
+         "evidence": "classifier logits"},
+    ]
+    det_id = insert(
+        db, "audio_detection", id=new_id("adet"), analysis_run_id=seed["run"],
+        started_at="2026-08-01T00:20:00Z", ended_at="2026-08-01T00:20:03Z",
+        media_start_offset_s=1200.0, media_end_offset_s=1203.0,
+        detection_source="merged",
+        species_candidates_json=json.dumps([{"species": "Testus dummius", "score": 0.42}]),
+        top_confidence=0.42,
+        raw_model_outputs_json=json.dumps(raw),
+    )
+    stored = json.loads(db.execute(
+        "SELECT raw_model_outputs_json FROM audio_detection WHERE id = ?", (det_id,)
+    ).fetchone()[0])
+    assert {entry["model"] for entry in stored} == {"sed-energy", "birdnet"}
+    assert stored[1]["raw_scores"]["Alterus avius"] == 0.11  # 代表スコア以外も保持
+
+
+def test_reference_observation_curation_fields(db, seed):
+    """ReferenceObservationの精査情報(精査者・方法・確信度・二重確認)を保存できる(D-11)。"""
+    ref_id = insert(
+        db, "reference_observation", id=new_id("ref"),
+        survey_session_id=seed["session"], species_id=seed["species"],
+        started_at="2026-08-01T00:30:00Z", observation_method="audio_review",
+        curator="調査者A", curation_method="スペクトログラム精査",
+        curated_at="2026-08-02T10:00:00Z", curation_confidence="high",
+        double_checked=1, second_curator="調査者B",
+        second_curated_at="2026-08-03T09:00:00Z",
+    )
+    row = db.execute("SELECT * FROM reference_observation WHERE id = ?", (ref_id,)).fetchone()
+    assert row["curator"] == "調査者A" and row["double_checked"] == 1
+    # 二重確認ありなのに第二精査者なしは拒否
+    with pytest.raises(sqlite3.IntegrityError):
+        insert(db, "reference_observation", id=new_id("ref"),
+               survey_session_id=seed["session"], species_id=seed["species"],
+               started_at="2026-08-01T00:40:00Z", observation_method="visual",
+               curator="調査者A", curation_method="目視", curated_at="2026-08-02T10:00:00Z",
+               curation_confidence="medium", double_checked=1)
+
+
+def _add_review(db, seed) -> str:
+    det = insert(
+        db, "audio_detection", id=new_id("adet"), analysis_run_id=seed["run"],
+        started_at="2026-08-01T01:00:00Z", ended_at="2026-08-01T01:00:03Z",
+        media_start_offset_s=3600.0, media_end_offset_s=3603.0,
+        detection_source="classifier",
+        raw_model_outputs_json="[]",
+    )
+    return insert(
+        db, "review", id=new_id("rev"), audio_detection_id=det,
+        reviewer="調査者A", reviewed_at="2026-08-02T00:00:00Z",
+        review_status="species_confirmed", species_id=seed["species"],
+        confirmed_rank="species", rationale="声質・節回しが一致",
+    )
+
+
+def test_review_is_append_only(db, seed):
+    rev_id = _add_review(db, seed)
+    with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+        db.execute("UPDATE review SET reviewer = 'X' WHERE id = ?", (rev_id,))
+    with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+        db.execute("DELETE FROM review WHERE id = ?", (rev_id,))
+
+
+def test_review_targets_exactly_one_detection(db, seed):
+    with pytest.raises(sqlite3.IntegrityError):
+        insert(db, "review", id=new_id("rev"), reviewer="A",
+               reviewed_at="2026-08-02T00:00:00Z", review_status="undeterminable")
+
+
+def test_analysis_run_frozen_after_completion(db, seed):
+    run_id = seed["run"]
+    # 実行中の更新(完了への遷移)は許可される
+    db.execute(
+        "UPDATE analysis_run SET status = 'completed', finished_at = ?, duration_seconds = 10 "
+        "WHERE id = ?", ("2026-08-01T02:00:00Z", run_id))
+    # 完了後は凍結(D-10)
+    with pytest.raises(sqlite3.DatabaseError, match="frozen"):
+        db.execute("UPDATE analysis_run SET note = 'x' WHERE id = ?", (run_id,))
+    with pytest.raises(sqlite3.DatabaseError, match="must not be deleted"):
+        db.execute("DELETE FROM analysis_run WHERE id = ?", (run_id,))
+
+
+def test_run_event_and_access_log_append_only(db, seed):
+    evt_id = insert(db, "run_event", id=new_id("evt"), analysis_run_id=seed["run"],
+                    occurred_at="2026-08-01T00:00:01Z", event_type="started")
+    log_id = insert(db, "access_log", id=new_id("alog"), actor="調査者A",
+                    occurred_at="2026-08-01T00:00:02Z", action="view",
+                    target="site:rounded_position")
+    for table, column, row_id in (
+        ("run_event", "message", evt_id),
+        ("access_log", "result", log_id),
+    ):
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            db.execute(f"UPDATE {table} SET {column} = 'x' WHERE id = ?", (row_id,))
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            db.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
+
+
+def test_detection_link_confirmation_requires_human_fields(db, seed):
+    det_a = insert(db, "audio_detection", id=new_id("adet"), analysis_run_id=seed["run"],
+                   started_at="2026-08-01T03:00:00Z", ended_at="2026-08-01T03:00:03Z",
+                   media_start_offset_s=0, media_end_offset_s=3,
+                   detection_source="classifier", raw_model_outputs_json="[]")
+    det_b = insert(db, "visual_detection", id=new_id("vdet"), analysis_run_id=seed["run"],
+                   started_at="2026-08-01T03:00:01Z", ended_at="2026-08-01T03:00:04Z",
+                   media_start_offset_s=1, media_end_offset_s=4)
+    # AI提示の関連候補(未確定)はOK
+    insert(db, "detection_link", id=new_id("link"), audio_a_id=det_a, visual_b_id=det_b,
+           link_type="time_proximity", proposed_by="ai")
+    # 確定者・日時なしの「確定」は拒否(自動確定の防止)
+    with pytest.raises(sqlite3.IntegrityError):
+        insert(db, "detection_link", id=new_id("link"), audio_a_id=det_a, visual_b_id=det_b,
+               link_type="time_proximity", proposed_by="ai", confirmed=1)

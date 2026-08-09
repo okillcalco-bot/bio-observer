@@ -121,6 +121,19 @@ with birdnet.AcousticPredictionSession(model) as s:
 - **モデルの保存先・モデル形式・バージョン・SHA-256・オフライン再利用方法の確定**(モデルキャッシュを `BIO_OBSERVER_MODELS_DIR` 等の管理対象ディレクトリへ固定できるかの検証を含む。現時点でライブラリ既定の保存先は未確認)
 - 速度・精度に問題が出た場合は本決定を見直す(その場合も本エントリは上書きせず追記で改訂する)
 
+### D-23:DB実装方式(T-004)— 標準ライブラリsqlite3+SQLファイル・マイグレーション
+- 日付:2026-08-09/決定者:Claude Code(T-004)/Issue #4
+- **方式**:ORMを使わず、標準ライブラリ `sqlite3` + 番号付きSQLマイグレーションファイル(`src/bio_observer/db/migrations/NNNN_name.sql`)+ 小さなランナー(`bio_observer.db.migrate`)。適用履歴は `schema_migrations` テーブルで管理し、各マイグレーションは1トランザクションで適用する。
+- **代替案と不採用理由**:SQLAlchemy+Alembic(業界標準でPostgreSQL移行が滑らか)は、MVPの依存最小方針・スキーマの見通し(生SQLでレビュー可能)を優先して現時点では不採用。テーブル数がさらに増える・PostgreSQL移行が現実化した時点で再評価する(移行時はSQLファイルがそのままDDLの正となる)。
+- **外部キー**:接続ヘルパー `connect()` が `PRAGMA foreign_keys = ON` を必ず実行し、有効化を確認できなければ接続を拒否する。
+- **不透明ID**:`<エンティティ略号>_<uuid4hex>`(例:`site_3f2a…`)。略号は `ids.ID_PREFIXES` に登録制とし、表示名由来のプレフィックスを拒否する。パス・IDに地点名・希少種名を使わない(STORAGE.md)。
+- **日時**:UTCのISO-8601文字列(`YYYY-MM-DDTHH:MM:SSZ`)で保存(D-6)。naive datetimeはヘルパーが拒否する。
+- **enum**:TEXT+CHECK制約。判定区分はSURVEY_METHOD.md第3章のASCIIコード対応(例:`species_confirmed`)。
+- **座標**:正確な座標列は作らない(D-12)。Siteは丸め表現(`rounded_position`:メッシュコード・市区町村名等の文字列)+`rounding_level` のみ。数値の緯度経度列は丸め済みであっても現段階では設けない(テストで列名を検査)。
+- **追記専用の担保**:DBトリガーで実装。`review`/`access_log`/`run_event` はUPDATE/DELETEを常に拒否。`analysis_run` は終端状態(completed/failed/aborted)後のUPDATEと、状態を問わずDELETEを拒否(実行中の状態遷移・完了時の確定更新は許可。D-10)。
+  - **限界(明記)**:SQLiteのトリガーはDDL権限があれば削除可能であり、DBファイルへ直接アクセスできる利用者に対する完全な防御ではない。誤操作(アプリのバグ・手動SQL)への防御と位置づける。PostgreSQL移行時はロール権限(INSERT可・UPDATE/DELETE不可)での担保へ置き換える。
+- 反映:src/bio_observer/db/、tests/test_db_migrations.py、tests/test_db_constraints.py。
+
 ---
 
 ## 旧・判断待ち事項の決定(P-1〜P-8 → D-14〜D-21)

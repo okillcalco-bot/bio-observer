@@ -1,5 +1,15 @@
 # 変更履歴(CHANGELOG.md)
 
+## 2026-08-09(T-004 DBスキーマ・マイグレーション基盤。Issue #4)
+
+- `bio_observer.db` 追加:DB接続(外部キー制約の強制有効化)、番号付きSQLマイグレーション基盤、schema_migrations管理(実装方式はD-23)
+- 初回マイグレーション 0001_initial:DATA_MODEL.md 3.1〜3.18の全19テーブル+FK・一意制約・CHECK enum・インデックス
+- 追記専用の担保:review/access_log/run_event のUPDATE/DELETE拒否トリガー、analysis_run の完了後凍結トリガー(D-1/D-10。限界はD-23に明記)
+- 不透明ID生成(`ids.new_id`、登録制プレフィックス)・UTC日時ヘルパー(D-6、naive拒否)
+- D-12遵守:正確な座標を保存する列は不存在(Siteは丸め表現+丸め粒度のみ。テストで列名検査)
+- DBテスト19件追加(全26件パス)
+- 解析機能・API・UIは未実装(T-101以降)
+
 ## 2026-08-09(PR #3 Codexレビュー対応)
 
 - THIRD_PARTY_LICENSES.md 新規作成。BirdNETのライセンス表記を修正(コード:MIT/学習済みモデル:CC BY-NC-SA 4.0。研究・技術検証前提、商用利用前の権利者確認を必須化)。D-22・READMEにも反映
