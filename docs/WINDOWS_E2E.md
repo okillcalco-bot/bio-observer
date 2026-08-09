@@ -78,6 +78,19 @@ bio-observer status
 
 問題が発生した場合は `bio-observer status` の最終エラーと、`results/<job_id>/status.json` を添えて報告してください(スクリーンショットに正確な座標・フォルダIDが写り込まないよう注意)。
 
+### 観察項目(合否外。T-112の改善効果の比較基準として記録)
+
+現状、Drive経由の取込では `recording_started_at` がダウンロード時刻に近い推定値になる既知事項がある(改善はIssue #12=T-112。撮影時刻の根拠優先順位:①動画内メタデータcreation_time→②Drive modifiedTime→③ローカル一時ファイル時刻→④人による補正・確定。自動取得は原則estimated、人の確認・補正のみconfirmed)。
+
+`results/<job_id>/summary.csv` から以下を記録しておく:
+
+| 観察項目 | IMG_3355 | IMG_3356 |
+|---|---|---|
+| recording_started_at の値 | | |
+| 実際の撮影時刻との差 | | |
+| recording_start_basis | | |
+| recording_start_certainty | | |
+
 ## 5. 短尺で通った後(次工程)
 
 4時間動画を受け箱へ置いて同じ手順を実行する(空き容量:動画サイズの約2倍以上を確保)。音声抽出・BirdNET/SED・候補クリップは T-102〜T-104 の接続後に `results/` へ追加される。
