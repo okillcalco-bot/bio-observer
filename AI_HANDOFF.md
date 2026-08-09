@@ -7,7 +7,7 @@
 
 ## 現在の状態
 
-フェーズ0(基盤)。T-003はPR #3でmainへマージ済み(Issue #2クローズ)。T-004(DBスキーマ・マイグレーション基盤)は実装完了し、CodexのT-005レビュー指摘(必須4点+推奨1点)への対応を反映済み。T-005再レビュー待ち(Issue #4、PR #5、ブランチ claude/t004-database-schema)。解析機能(FFmpeg抽出・BirdNET・SED・映像検出)・API・UIは未実装(T-101以降)。
+フェーズ1(音声パイプライン)開始。T-004はT-005承認を経てPR #5でmainへマージ済み(Issue #4クローズ、main: 80c506d)。T-101(メディア登録)を実装完了し、Codexレビュー待ち(Issue #7、ブランチ claude/t101-media-registration)。音声抽出・BirdNET/SED・映像検出・UI・Drive連携(T-110)は未実装。
 
 ## 完了したこと
 
@@ -37,10 +37,10 @@
 
 ## 未完了のこと
 
-- T-004 PRのレビュー(Codex T-005)・マージ
-- T-101以降すべて(メディア登録、FFmpeg抽出、BirdNET/SED、映像検出、UI、CSV出力)
-- リモート環境からの `claude/t003-repo-init` ブランチ削除(git/API双方403。権限が付与され次第削除するか、GitHub上で手動削除)
-- 実地スモークテスト用の7秒動画は解析パイプライン実装後に使用する(リポジトリへはコミットしない)
+- T-101 PRのCodexレビュー・マージ
+- T-102以降(音声抽出、BirdNET/SED、クリップ生成、UI、CSV出力)、T-110(Drive自動取込。T-101マージ後)
+- リモート環境からの `claude/t003-repo-init`・`claude/t004-database-schema` ブランチ削除(ref削除権限403。GitHub上で手動削除)
+- 実地スモークテスト用の短尺動画はT-110のE2Eテストで使用する(リポジトリへはコミットしない)
 - **M1着手時(T-103)にローカル解析機で必ず実施する申し送り事項**(結果はDECISIONS.md D-22とTHIRD_PARTY_LICENSES.mdへ追記):
   1. **ローカル推論スモークテスト**:モデルダウンロード+合成WAVでの推論実行+処理速度計測(本検証環境ではモデル配布元 zenodo.org / tuc.cloud がegressポリシーで遮断され未実施)
   2. **audio推移依存のlock生成**:推論成功後に `pip freeze` でaudio依存を含むlock(`requirements-audio.lock`)を生成する(現状 `requirements-dev.lock` は開発依存のみ。birdnet本体は0.2.16固定だが推移依存は未固定)
@@ -50,10 +50,17 @@
 
 ## 次に行うべきこと
 
-1. Codex:T-005 再レビュー(指摘対応済み。PR #5)
-2. 調査責任者:T-004 PRのマージ判断
-3. Claude Code:マージ後にT-101 メディア登録(1 Issue = 1 branch = 1 PR)
-4. Claude Code:T-101完了後にT-110 Google Drive自動取込(Issue #6。独立ブランチ・独立PR)
+1. Codex:T-101 PRのレビュー(media_registryのD-26遵守・クリーンアップ保証・テスト網羅の確認)
+2. 調査責任者:T-101 PRのマージ判断
+3. Claude Code:マージ後にT-110 Google Drive自動取込(Issue #6。独立ブランチ・独立PR)、並行してT-102 音声抽出
+
+## T-101実装の要点(レビュー観点)
+
+- `bio_observer.media_registry`:probe_media(FFprobe)/compute_sha256(ストリーミング)/register_media
+- 登録手順:probe→容量確認→コピー(1パスでハッシュ計算)→コピー先再ハッシュ照合→重複確認→DB挿入→atomic rename→commit。例外時はrollback+ファイル削除(D-26)
+- 保存先は originals/<project_id>/<site_id>/<station_id>/<survey_session_id>/<media_id><ext>(元ファイル名を露出しない)
+- certainty='confirmed' は basis='manual'/'corrected' のみ許可(自動断定禁止)
+- テスト11件:動画/WAV登録、ストリーミングハッシュ一致、重複拒否、破損ファイル、不存在・非対応拡張子、容量不足、confirmed制限、rename失敗時クリーンアップ、不明セッション、probe単体
 
 ## 承認済み追加要件:Google Drive自動取込(T-110 / Issue #6)
 
@@ -73,7 +80,7 @@
 
 ## 実行したテスト/テスト結果
 
-- `pytest`:34件すべてパス(環境確認7件+DB27件)
+- `pytest`:45件すべてパス(環境確認7件+DB27件+メディア登録11件)
 - DBテスト内訳:空DBへの最新スキーマ構築/1バージョンずつの段階的マイグレーション/再実行の冪等性/外部キー有効化・integrity_check/正確座標列の不存在検査/不透明IDポリシー/UTCヘルパー/FK違反拒否/一意制約/enum CHECK拒否/SED由来・種候補なしAudioDetection保存/統合後の生スコア保持/ReferenceObservation精査情報+二重確認CHECK/review追記専用/analysis_run完了後凍結/run_event・access_log追記専用/DetectionLink確定に人の記録必須
 - `bio-observer-envcheck`:すべてOK(Python 3.11.15 / ffmpeg 6.1.1 / ffprobe 6.1.1 / 設定読み込み)
 - ライブラリ比較:birdnet 0.2.16・birdnet-analyzer 2.4.0のインストール・API検証(詳細はD-22)。推論は未実施(T-103申し送り)

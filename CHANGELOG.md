@@ -1,5 +1,17 @@
 # 変更履歴(CHANGELOG.md)
 
+## 2026-08-09(T-101 メディア登録。Issue #7)
+
+- `bio_observer.media_registry` 追加:ローカル動画・音声のMediaAsset登録(MVP要件1〜3)
+  - FFprobeメタデータ取得(codec/width/height/fps/sample_rate/channels/duration)
+  - ストリーミングSHA-256+同一原本の二重登録防止
+  - 原本は読み取りのみ。一時ファイル→ハッシュ照合→atomic renameで保存先へコピー
+  - 失敗時はDB行・一時/確定ファイルを残さない(rename失敗注入テストで検証)
+  - 撮影開始日時の確実性ポリシー:confirmed は人の入力・補正のみ、ファイル時刻由来は estimated(D-26)
+  - 保存先・DBに元ファイル名を露出しない(不透明IDのみ)
+  - 空き容量の事前確認
+- テスト11件追加(全45件パス)
+
 ## 2026-08-09(T-005再レビュー指摘対応:系譜IDのイミュータブル化)
 
 - analysis_run.media_asset_id / visual_detection.analysis_run_id / audio_detection.analysis_run_id を作成後変更禁止に(トリガー。同値UPDATEは許可)。親側更新による系譜整合の迂回を防止(D-23追記)
