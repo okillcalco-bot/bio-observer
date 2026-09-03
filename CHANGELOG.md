@@ -1,5 +1,16 @@
 # 変更履歴(CHANGELOG.md)
 
+## 2026-08-09(T-112 撮影開始時刻の根拠優先順位。Issue #12)
+
+- probe_media が動画内メタデータの creation_time(format/stream tags、com.apple.quicktime.creationdate も対象)を生の値+タグ所在として取得。`parse_timestamp` がZ/±HH:MM/±HHMM/小数秒/空白区切りをUTCへ正規化
+- **タイムゾーン表記のない値は timezone_unknown として不採用**(慣例だけを根拠にUTC自動採用しない)。機器・調査設定に基づく明示的な解釈条件 `BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE`("+09:00"/"Asia/Tokyo")が設定された場合のみ採用し、条件と由来を記録(timezone=assumed)。tzdata を依存へ追加(Windowsのzoneinfo用)
+- register_media の自動推定を優先順位化:①creation_time(metadata)→②取込元の更新時刻 `origin_modified_time`(Drive modifiedTime。createdTimeは使わない)→③ローカルファイル時刻。自動推定は常にestimated、confirmedは人の入力・補正のみ(D-26維持)
+- **候補評価の構造化記録**:各候補の source / raw value / normalized value / timezone / 解釈条件 / 採否 / 不採用理由を RegistrationResult.recording_start_candidates → ingest_event(registered遷移)→ status.json に保持(スキーマ変更なし。既存レコードのバックフィルなし)
+- `bio-observer inspect-time` を追加(登録・DB・Driveへ触れずに候補評価を表示)。docs/VERIFICATION_T112.md に実測記録(Drive側メタデータは実測済み、動画内メタデータは実機で記入)
+- 取込ワーカーは Drive の modifiedTime を優先順位2として渡す(ダウンロード時刻への依存を解消)
+- worker の再取得コードをヘルパー化(_reload)。docs/WINDOWS_E2E.md に観察項目(recording_started_at・実撮影時刻との差・basis・certainty・source)を追加
+- テスト10件追加(全92件パス)。D-26追記、DATA_MODEL.md 3.5更新
+
 ## 2026-08-09(T-111レビュー対応:dry-runの完全読み取り専用化・ロック取得の前倒し)
 
 - dry-run/statusをSQLite読み取り専用接続(mode=ro URI)へ変更。DB未初期化でもDBファイルを作成せず案内して終了(migrationも走らない)

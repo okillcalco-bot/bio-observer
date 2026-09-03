@@ -7,7 +7,16 @@
 
 ## 現在の状態
 
-フェーズ1(音声パイプライン)。T-110はCodex承認を経てPR #9でmainへマージ済み(Issue #6クローズ、main: a993260)。T-111(取込CLI)を実装完了し、Codexレビュー待ち(Issue #10、ブランチ claude/t111-ingest-cli)。マージ後にWindows解析PCで実Drive E2E(docs/WINDOWS_E2E.md)を実施予定。音声抽出(T-102)・BirdNET/SED(T-103)・映像検出・UIは未実装。
+フェーズ1(音声パイプライン)。基盤(設計→DB→メディア登録→Drive取込→CLI)はmain 89b8050までマージ済み(T-111 PR #11、Issue #10クローズ)。T-112(撮影開始時刻の根拠優先順位)を実装完了し、Codexレビュー待ち(Issue #12、ブランチ claude/t112-recording-time-basis)。Windows解析PCでの短尺2本の実Drive E2E(docs/WINDOWS_E2E.md)は利用者が実施中。音声抽出(T-102)・BirdNET/SED(T-103)・映像検出・UIは未実装。
+
+## T-112実装の要点(レビュー観点)
+
+- `media_registry.probe_media`:creation_time(format tags→stream tags、com.apple.quicktime.creationdate も対象)を生の値+タグ所在で取得。`parse_timestamp` がUTC正規化し、**タイムゾーン表記なしは timezone_unknown として不採用**(明示的な解釈条件 `BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE` がある場合のみ assumed として採用し条件を記録)。tzdata を依存に追加
+- `register_media`:未指定時の自動推定を `evaluate_recording_start_candidates` で優先順位化(①metadata creation_time→②origin_modified_time(Drive modifiedTime。createdTimeは不使用)→③local mtime)。自動推定は常にestimated。confirmedは basis=manual/corrected のみ(既存ポリシー維持)
+- **候補記録**:各候補の source/raw/normalized/timezone/解釈条件/採否/不採用理由を `RegistrationResult.recording_start_candidates` → ingest_event(registered遷移detail)→ status.json に保持。スキーマ変更なし・既存レコードのバックフィルなし
+- ワーカー:`origin_modified_time=job["modified_time"]`・`naive_timezone=storage.media_naive_timezone` を渡す。`_reload` ヘルパーで再取得コードを整理。CLIに `inspect-time`(読み取り専用の候補評価)を追加
+- 実測:docs/VERIFICATION_T112.md(Drive側 modifiedTime/createdTime/サイズは実測済み。動画内creation_time・採用値は実機で inspect-time により記入)
+- テスト10件:parse_timestamp各表記/表記なし不採用/解釈条件つき採用(+09:00・Asia/Tokyo)・不正条件拒否/候補記録の再現性(条件なし→②採用、条件あり→①採用)/優先1(creation_time埋込合成動画)/優先2/優先3/metadata由来のconfirmed拒否/取込でDrive modifiedTime採用+候補記録/inspect-time読み取り専用
 
 ## T-111実装の要点(レビュー観点)
 
@@ -71,9 +80,9 @@
 
 ## 次に行うべきこと
 
-1. Codex:T-111 PRのレビュー(dry-runの読み取り専用保証・排他ロック・秘密情報マスクの確認)
-2. 調査責任者:T-111 PRのマージ判断
-3. マージ後:Windows解析PCでの実機E2E(docs/WINDOWS_E2E.md のチェックリスト8項目)、並行してClaude CodeがT-102 音声抽出へ着手
+1. 利用者:Windows解析PCでの短尺2本の実機E2E(docs/WINDOWS_E2E.md のチェックリスト8項目+観察項目)
+2. Codex:T-112 PRのレビュー(優先順位・確実性ポリシー維持・TZ解釈・スキーマ無変更の確認)
+3. 調査責任者:E2E成功後にT-112 PRをマージ → Claude CodeがT-102 音声抽出へ着手(基準時刻を先に確定してから解析へ進む)
 
 ## T-101実装の要点(レビュー観点)
 
@@ -102,7 +111,7 @@
 
 ## 実行したテスト/テスト結果
 
-- `pytest`:82件すべてパス(環境確認7件+DB27件+メディア登録19件+Drive取込15件+CLI14件)
+- `pytest`:92件すべてパス(環境確認7件+DB27件+メディア登録27件+Drive取込16件+CLI15件)
 - DBテスト内訳:空DBへの最新スキーマ構築/1バージョンずつの段階的マイグレーション/再実行の冪等性/外部キー有効化・integrity_check/正確座標列の不存在検査/不透明IDポリシー/UTCヘルパー/FK違反拒否/一意制約/enum CHECK拒否/SED由来・種候補なしAudioDetection保存/統合後の生スコア保持/ReferenceObservation精査情報+二重確認CHECK/review追記専用/analysis_run完了後凍結/run_event・access_log追記専用/DetectionLink確定に人の記録必須
 - `bio-observer-envcheck`:すべてOK(Python 3.11.15 / ffmpeg 6.1.1 / ffprobe 6.1.1 / 設定読み込み)
 - ライブラリ比較:birdnet 0.2.16・birdnet-analyzer 2.4.0のインストール・API検証(詳細はD-22)。推論は未実施(T-103申し送り)

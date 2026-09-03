@@ -176,6 +176,15 @@ with birdnet.AcousticPredictionSession(model) as s:
 - **確定後の後処理も完全ロールバック**:`os.link` 成功後の一時ファイル削除に失敗した場合、自分が作成した確定ファイル(リンク)を取り消して例外を再送出する。「DB行のない確定ファイル」が残る経路を塞ぐ。フォールバックのコピー途中失敗も、自分が排他的に作成した確定ファイルのみ削除して再送出する。
 - **トランザクション契約の明文化**:`register_media` は接続のトランザクション所有者として振る舞い、成功時 `conn.commit()`/失敗時 `conn.rollback()` を接続全体へ発行する。呼び出し側の未確定変更と同一トランザクションで合成しないこと。将来、取込ワーカー(T-110)等で他のDB操作と合成する必要が生じた場合はSAVEPOINTによる局所トランザクション化を検討する(非ブロッキング申し送り)。
 
+**追記(2026-08-09、T-112:撮影開始時刻の根拠優先順位。Issue #12)**
+- 背景:Drive経由の取込ではローカル一時ファイルの更新時刻がダウンロード時刻となり、共通タイムラインの基準である `recording_started_at` が実撮影時刻からズレる既知事項があった。解析(T-102以降)開始前に基準時刻を正す。
+- **自動推定の優先順位**:①動画内メタデータの creation_time(format tags→stream tags。basis=metadata)→ ②取込元の更新時刻 `origin_modified_time`(Drive の modifiedTime 等。basis=file_time)→ ③ローカルファイル時刻(basis=file_time。最後の手段)。自動推定は常に certainty=estimated。④人による補正・確定(basis=manual/corrected)のみ confirmed を許可(本決定の確実性ポリシーを維持)。
+- **採用根拠と候補評価の記録(再現可能性)**:media_asset のスキーマは変更せず(basis/certainty列のまま)、採用した根拠(recording_start_source:media_metadata_creation_time / origin_modified_time / local_file_mtime / caller)に加え、**各候補について source / raw value / normalized value / timezone(explicit・assumed・timezone_unknown・invalid・missing)/ 解釈条件 / 採用・不採用 / 不採用理由** を構造化して保持する。保持先は RegistrationResult.recording_start_candidates → ingest_event(registered遷移のdetail_json)→ results/<job_id>/status.json。列追加(マイグレーション)を伴わない最小変更を選択。
+- **タイムゾーン解釈規則**:creation_time 等はISO-8601として解釈し、Z/±HH:MM/±HHMM/小数秒/空白区切りを受理してUTCへ正規化する。**タイムゾーン表記のない値は timezone_unknown として識別し、慣例(FFmpegはUTC表記が多い等)だけを根拠に自動採用しない。** 機器・調査設定に基づく明示的な解釈条件(`BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE`:"+09:00" / "Asia/Tokyo" 等)が与えられた場合のみ適用し、使用した解釈条件と由来を候補記録に残す(timezone=assumed)。解釈根拠がなければ不採用として次の優先順位へフォールバックする。解釈不能な値・不正な解釈条件も不採用。
+- **Drive の createdTime は使わない**:createdTime はアップロード時刻であり撮影時刻の根拠にならないため、取込元の更新時刻としては modifiedTime のみを候補②に用いる。
+- **既存レコードへの影響なし**:本改善は新規登録時の推定にのみ作用する。既存の media_asset(completed済みの取込を含む)の値を再計算・上書きするバックフィルは行わない(原則3・4。再評価が必要なら人の補正④として新たに記録する)。
+- **検証用コマンド**:`bio-observer inspect-time <file> [--origin-modified-time …]` で候補評価を登録なし・DB/Drive無変更で表示できる(実機E2Eの観察・実測に使用)。
+
 ### D-27:Google Drive自動取込の設計(T-110)
 - 日付:2026-08-09/決定者:Claude Code(T-110)/Issue #6
 - **取込状態は専用エンティティで管理**:IngestJob(状態機械)+IngestEvent(追記専用の遷移ログ)を新設(マイグレーション0002、DATA_MODEL.md 3.20/3.21)。解析実行のJobStep/RunEventとは分離する(取込は解析Runの前段であり、RunEventはanalysis_runに紐づくため)。状態変化は上書きに加えて必ずIngestEventへ追記する。
