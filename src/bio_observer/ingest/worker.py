@@ -204,8 +204,10 @@ def _register(conn: sqlite3.Connection, storage: StorageConfig,
     try:
         result = register_media(
             conn, downloaded, job["survey_session_id"], storage=storage,
-            # 優先順位2(T-112):Drive上の更新時刻。動画内creation_timeがあればそちらが優先
+            # 優先順位2(T-112):Drive上の modifiedTime(createdTime=アップロード時刻は使わない)。
+            # 動画内creation_timeがタイムゾーン付きで解釈できればそちらが優先
             origin_modified_time=job["modified_time"],
+            naive_timezone=storage.media_naive_timezone,
             note=f"ingest:{job['id']}",
         )
     except DuplicateMediaError as exc:
@@ -221,7 +223,9 @@ def _register(conn: sqlite3.Connection, storage: StorageConfig,
                         "recording_started_at": result.recording_started_at,
                         "recording_start_basis": result.recording_start_basis,
                         "recording_start_certainty": result.recording_start_certainty,
-                        "recording_start_source": result.recording_start_source},
+                        "recording_start_source": result.recording_start_source,
+                        # 各候補の raw/normalized/timezone/解釈条件/採否/不採用理由(再現可能性)
+                        "recording_start_candidates": list(result.recording_start_candidates)},
                 media_asset_id=result.media_asset_id)
     downloaded.unlink(missing_ok=True)  # 原本はoriginals/とDrive上に存在
 
@@ -259,6 +263,7 @@ def _upload_results(conn: sqlite3.Connection, client: DriveClient,
             "recording_start_basis": media["recording_start_basis"] if media else None,
             "recording_start_certainty": media["recording_start_certainty"] if media else None,
             "recording_start_source": recording.get("recording_start_source"),
+            "recording_start_candidates": recording.get("recording_start_candidates"),
             "status": "completed",
             "retry_count": job["retry_count"],
             "generated_at": utc_now_iso(),

@@ -433,6 +433,14 @@ def test_ingest_uses_drive_modified_time_when_no_creation_time(
     status = json.loads(drive.results_files(job["results_folder_name"])["status.json"])
     assert status["recording_started_at"] == "2026-07-29T08:05:00Z"
     assert status["recording_start_source"] == "origin_modified_time"
+    # 各候補の評価記録(raw/normalized/timezone/解釈/採否/不採用理由)が返却される
+    candidates = status["recording_start_candidates"]
+    assert [c["source"] for c in candidates] == [
+        "media_metadata_creation_time", "origin_modified_time", "local_file_mtime"]
+    assert candidates[0]["adopted"] is False and candidates[0]["rejection_reason"] == "値なし"
+    assert candidates[1]["adopted"] is True
+    assert candidates[1]["raw_value"] == "2026-07-29T08:05:00.000Z"
+    assert candidates[2]["adopted"] is False and candidates[2]["rejection_reason"]
 
 
 def test_ingest_event_append_only(db, seed, cfg):

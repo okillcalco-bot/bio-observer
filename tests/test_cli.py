@@ -222,6 +222,20 @@ def test_lock_acquired_before_db_and_oauth(env, capsys):
         held.close()
 
 
+def test_inspect_time_is_read_only_and_shows_candidates(env, capsys, tmp_path, sample_bytes):
+    """inspect-time は登録・DB・Driveへ触れず、候補評価のみ表示する。"""
+    video = tmp_path / "clip_for_inspect.mp4"
+    video.write_bytes(sample_bytes)
+    code = main(["inspect-time", str(video),
+                 "--origin-modified-time", "2026-08-09T11:35:51Z"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "media_metadata_creation_time" in out and "値なし" in out
+    assert "origin_modified_time" in out and "採用値: 2026-08-09T11:35:51Z" in out
+    assert "未設定(表記なしは不採用)" in out
+    assert not _db_file(env).exists()  # DBを作らない
+
+
 def test_interval_must_be_positive(env, capsys):
     for bad in ("0", "-5", "abc"):
         with pytest.raises(SystemExit) as exc:

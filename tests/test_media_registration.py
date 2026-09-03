@@ -391,14 +391,71 @@ def sample_video_with_creation_time(tmp_path_factory):
     return path
 
 
-def test_normalize_utc_iso_variants():
-    from bio_observer.media_registry import normalize_utc_iso
-    assert normalize_utc_iso("2026-07-29T08:01:00.000000Z") == "2026-07-29T08:01:00Z"
-    assert normalize_utc_iso("2026-07-29T17:01:00+0900") == "2026-07-29T08:01:00Z"
-    assert normalize_utc_iso("2026-07-29T17:01:00+09:00") == "2026-07-29T08:01:00Z"
-    assert normalize_utc_iso("2026-07-29 08:01:00") == "2026-07-29T08:01:00Z"  # naiveはUTC扱い
-    assert normalize_utc_iso("not-a-date") is None
-    assert normalize_utc_iso(None) is None
+def test_parse_timestamp_explicit_timezone_variants():
+    from bio_observer.media_registry import TZ_EXPLICIT, TZ_INVALID, TZ_MISSING, parse_timestamp
+    for raw in ("2026-07-29T08:01:00.000000Z", "2026-07-29T17:01:00+0900",
+                "2026-07-29T17:01:00+09:00", "2026-07-29 03:01:00-05:00"):
+        parsed = parse_timestamp(raw)
+        assert parsed.normalized_value == "2026-07-29T08:01:00Z", raw
+        assert parsed.timezone == TZ_EXPLICIT and parsed.raw_value == raw
+    assert parse_timestamp("not-a-date").timezone == TZ_INVALID
+    assert parse_timestamp(None).timezone == TZ_MISSING
+
+
+def test_naive_timestamp_is_rejected_without_interpretation_basis():
+    """タイムゾーン表記なしはUTCとして自動採用しない(timezone_unknown→不採用)。"""
+    from bio_observer.media_registry import TZ_UNKNOWN, parse_timestamp
+    parsed = parse_timestamp("2026-07-29 17:01:00")
+    assert parsed.normalized_value is None
+    assert parsed.timezone == TZ_UNKNOWN
+    assert "解釈根拠がない" in parsed.interpretation
+
+
+def test_naive_timestamp_adopted_only_with_explicit_assumption():
+    """機器・調査設定に基づく解釈条件が与えられた場合のみ採用し、条件を記録する。"""
+    from bio_observer.media_registry import TZ_ASSUMED, TZ_INVALID, parse_timestamp
+    for assumption in ("+09:00", "Asia/Tokyo"):
+        parsed = parse_timestamp("2026-07-29 17:01:00", naive_timezone=assumption,
+                                 naive_timezone_origin="BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE")
+        assert parsed.normalized_value == "2026-07-29T08:01:00Z"
+        assert parsed.timezone == TZ_ASSUMED
+        assert assumption in parsed.interpretation
+        assert "BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE" in parsed.interpretation
+    # 解釈条件そのものが不正なら採用しない
+    assert parse_timestamp("2026-07-29 17:01:00",
+                           naive_timezone="Mars/Olympus").timezone == TZ_INVALID
+
+
+def test_candidate_records_are_reproducible(sample_video):
+    """各候補について source/raw/normalized/timezone/解釈条件/採否/不採用理由を保持する。"""
+    from bio_observer.media_registry import MediaMetadata, evaluate_recording_start_candidates
+    meta = MediaMetadata(media_type="video", codec="h264", width=1, height=1, fps=1,
+                         sample_rate=None, channels=None, duration_seconds=1.0,
+                         creation_time_raw="2026-07-29 17:01:00",  # 表記なし
+                         creation_time_tag="format.tags.creation_time")
+    epoch = 1785000000.0
+    # 解釈条件なし:①はtimezone_unknownで不採用 → ②を採用
+    candidates = evaluate_recording_start_candidates(
+        meta, "2026-08-09T11:35:51Z", epoch)
+    assert [c["source"] for c in candidates] == [
+        "media_metadata_creation_time", "origin_modified_time", "local_file_mtime"]
+    first, second, third = candidates
+    assert first["raw_value"] == "2026-07-29 17:01:00" and first["normalized_value"] is None
+    assert first["timezone"] == "timezone_unknown" and first["adopted"] is False
+    assert "timezone_unknown" in first["rejection_reason"]
+    assert second["adopted"] is True and second["normalized_value"] == "2026-08-09T11:35:51Z"
+    assert second["timezone"] == "explicit" and second["rejection_reason"] is None
+    assert third["adopted"] is False and "優先度の高い候補" in third["rejection_reason"]
+    assert third["normalized_value"] is not None and third["raw_value"] == repr(epoch)
+    # 解釈条件あり:①を採用し、条件が記録される
+    candidates = evaluate_recording_start_candidates(
+        meta, "2026-08-09T11:35:51Z", epoch, naive_timezone="+09:00",
+        naive_timezone_origin="BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE")
+    assert candidates[0]["adopted"] is True
+    assert candidates[0]["normalized_value"] == "2026-07-29T08:01:00Z"
+    assert candidates[0]["timezone"] == "assumed"
+    assert "+09:00" in candidates[0]["interpretation"]
+    assert candidates[1]["adopted"] is False
 
 
 def test_recording_start_priority_metadata_first(db, seed, storage,
@@ -413,6 +470,10 @@ def test_recording_start_priority_metadata_first(db, seed, storage,
     assert tuple(row) == ("2026-07-29T08:01:00Z", "metadata", "estimated")
     assert result.recording_start_source == "media_metadata_creation_time"
     assert result.metadata.creation_time == "2026-07-29T08:01:00Z"
+    assert result.metadata.creation_time_tag == "format.tags.creation_time"
+    # 候補記録が結果に含まれる(①採用、②③は不採用理由つき)
+    assert [c["adopted"] for c in result.recording_start_candidates] == [True, False, False]
+    assert result.recording_start_candidates[0]["timezone"] == "explicit"
 
 
 def test_recording_start_priority_origin_modified_second(db, seed, storage, sample_video):

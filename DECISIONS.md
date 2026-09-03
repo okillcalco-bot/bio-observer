@@ -179,8 +179,11 @@ with birdnet.AcousticPredictionSession(model) as s:
 **追記(2026-08-09、T-112:撮影開始時刻の根拠優先順位。Issue #12)**
 - 背景:Drive経由の取込ではローカル一時ファイルの更新時刻がダウンロード時刻となり、共通タイムラインの基準である `recording_started_at` が実撮影時刻からズレる既知事項があった。解析(T-102以降)開始前に基準時刻を正す。
 - **自動推定の優先順位**:①動画内メタデータの creation_time(format tags→stream tags。basis=metadata)→ ②取込元の更新時刻 `origin_modified_time`(Drive の modifiedTime 等。basis=file_time)→ ③ローカルファイル時刻(basis=file_time。最後の手段)。自動推定は常に certainty=estimated。④人による補正・確定(basis=manual/corrected)のみ confirmed を許可(本決定の確実性ポリシーを維持)。
-- **採用根拠の記録**:media_asset のスキーマは変更せず(basis/certainty列のまま)、採用した根拠の詳細(media_metadata_creation_time / origin_modified_time / local_file_mtime / caller)を RegistrationResult・ingest_event(registered遷移のdetail)・results/<job_id>/status.json に記録する。列追加(マイグレーション)を伴わない最小変更を選択。
-- **タイムゾーン解釈**:creation_time 等はISO-8601として解釈し、Z/±HH:MM/±HHMM/小数秒/空白区切りを受理してUTCへ正規化する。**タイムゾーン表記のない値はUTCとみなす**(FFmpegのcreation_timeはUTC表記が慣例)。解釈不能な値は採用せず次の優先順位へ進む。カメラ機種によるローカル時刻表記の可能性は、estimated に留めることと人の補正(④)で吸収する。
+- **採用根拠と候補評価の記録(再現可能性)**:media_asset のスキーマは変更せず(basis/certainty列のまま)、採用した根拠(recording_start_source:media_metadata_creation_time / origin_modified_time / local_file_mtime / caller)に加え、**各候補について source / raw value / normalized value / timezone(explicit・assumed・timezone_unknown・invalid・missing)/ 解釈条件 / 採用・不採用 / 不採用理由** を構造化して保持する。保持先は RegistrationResult.recording_start_candidates → ingest_event(registered遷移のdetail_json)→ results/<job_id>/status.json。列追加(マイグレーション)を伴わない最小変更を選択。
+- **タイムゾーン解釈規則**:creation_time 等はISO-8601として解釈し、Z/±HH:MM/±HHMM/小数秒/空白区切りを受理してUTCへ正規化する。**タイムゾーン表記のない値は timezone_unknown として識別し、慣例(FFmpegはUTC表記が多い等)だけを根拠に自動採用しない。** 機器・調査設定に基づく明示的な解釈条件(`BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE`:"+09:00" / "Asia/Tokyo" 等)が与えられた場合のみ適用し、使用した解釈条件と由来を候補記録に残す(timezone=assumed)。解釈根拠がなければ不採用として次の優先順位へフォールバックする。解釈不能な値・不正な解釈条件も不採用。
+- **Drive の createdTime は使わない**:createdTime はアップロード時刻であり撮影時刻の根拠にならないため、取込元の更新時刻としては modifiedTime のみを候補②に用いる。
+- **既存レコードへの影響なし**:本改善は新規登録時の推定にのみ作用する。既存の media_asset(completed済みの取込を含む)の値を再計算・上書きするバックフィルは行わない(原則3・4。再評価が必要なら人の補正④として新たに記録する)。
+- **検証用コマンド**:`bio-observer inspect-time <file> [--origin-modified-time …]` で候補評価を登録なし・DB/Drive無変更で表示できる(実機E2Eの観察・実測に使用)。
 
 ### D-27:Google Drive自動取込の設計(T-110)
 - 日付:2026-08-09/決定者:Claude Code(T-110)/Issue #6

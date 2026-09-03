@@ -80,7 +80,7 @@ bio-observer status
 
 ### 観察項目(合否外。T-112の改善効果の比較基準として記録)
 
-撮影開始日時は自動推定(T-112の優先順位:①動画内メタデータcreation_time→②Drive modifiedTime→③ローカル一時ファイル時刻。自動取得は原則estimated、④人の確認・補正のみconfirmed)。T-112マージ前のmainで実行した場合は③(ダウンロード時刻に近い値)になる既知事項があるため、どの根拠が採用されたか(`status.json` の `recording_start_source`)とあわせて記録する。
+撮影開始日時は自動推定(T-112の優先順位:①動画内メタデータcreation_time→②Drive modifiedTime→③ローカル一時ファイル時刻。自動取得は原則estimated、④人の確認・補正のみconfirmed。タイムゾーン表記のない値は `BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE` の明示設定がなければ不採用)。T-112マージ前のmainで実行した場合は③(ダウンロード時刻に近い値)になる既知事項があるため、どの根拠が採用されたか(`status.json` の `recording_start_source` と `recording_start_candidates`)とあわせて記録する。
 
 `results/<job_id>/summary.csv`・`status.json` から以下を記録しておく:
 
@@ -90,6 +90,18 @@ bio-observer status
 | 実際の撮影時刻との差 | | |
 | recording_start_basis | | |
 | recording_start_certainty | | |
+| recording_start_source | | |
+| 動画内creation_time(raw / timezone) | | |
+| Drive modifiedTime | | |
+
+登録せずに候補評価だけ確認する(DB・Driveへ触れない):
+
+```powershell
+bio-observer inspect-time "<DATA_ROOT>\ingest_tmp\<job_id>.mov" --origin-modified-time 2026-08-09T11:35:51Z
+# または受け箱からローカルへ手動ダウンロードしたコピーを指定
+```
+
+実測値の記録先は docs/VERIFICATION_T112.md。
 
 ## 5. 短尺で通った後(次工程)
 
