@@ -7,7 +7,15 @@
 
 ## 現在の状態
 
-フェーズ1(音声パイプライン)。T-110はCodex承認を経てPR #9でmainへマージ済み(Issue #6クローズ、main: a993260)。T-111(取込CLI)を実装完了し、Codexレビュー待ち(Issue #10、ブランチ claude/t111-ingest-cli)。マージ後にWindows解析PCで実Drive E2E(docs/WINDOWS_E2E.md)を実施予定。音声抽出(T-102)・BirdNET/SED(T-103)・映像検出・UIは未実装。
+フェーズ1(音声パイプライン)。基盤(設計→DB→メディア登録→Drive取込→CLI)はmain 89b8050までマージ済み(T-111 PR #11、Issue #10クローズ)。T-112(撮影開始時刻の根拠優先順位)を実装完了し、Codexレビュー待ち(Issue #12、ブランチ claude/t112-recording-time-basis)。Windows解析PCでの短尺2本の実Drive E2E(docs/WINDOWS_E2E.md)は利用者が実施中。音声抽出(T-102)・BirdNET/SED(T-103)・映像検出・UIは未実装。
+
+## T-112実装の要点(レビュー観点)
+
+- `media_registry.probe_media`:creation_time(format tags→stream tags、com.apple.quicktime.creationdate も対象)を `normalize_utc_iso` でUTC正規化(TZなしはUTC扱い、解釈不能はNone)
+- `register_media`:未指定時の自動推定を `_estimate_recording_start` で優先順位化(①metadata creation_time→②origin_modified_time→③local mtime)。自動推定は常にestimated。confirmedは basis=manual/corrected のみ(既存ポリシー維持)
+- 採用根拠 `recording_start_source` を RegistrationResult に追加。スキーマ変更なし(media_assetの列は不変)。ワーカーは registered 遷移の detail と status.json に記録
+- ワーカー:`origin_modified_time=job["modified_time"]` を渡す。`_reload` ヘルパーで再取得コードを整理
+- テスト6件:normalize_utc_iso各表記/優先1(creation_time埋込合成動画)/優先2(origin時刻)/優先3(ローカル時刻)/metadata由来のconfirmed拒否/取込でDrive modifiedTime採用+source記録
 
 ## T-111実装の要点(レビュー観点)
 
@@ -71,9 +79,9 @@
 
 ## 次に行うべきこと
 
-1. Codex:T-111 PRのレビュー(dry-runの読み取り専用保証・排他ロック・秘密情報マスクの確認)
-2. 調査責任者:T-111 PRのマージ判断
-3. マージ後:Windows解析PCでの実機E2E(docs/WINDOWS_E2E.md のチェックリスト8項目)、並行してClaude CodeがT-102 音声抽出へ着手
+1. 利用者:Windows解析PCでの短尺2本の実機E2E(docs/WINDOWS_E2E.md のチェックリスト8項目+観察項目)
+2. Codex:T-112 PRのレビュー(優先順位・確実性ポリシー維持・TZ解釈・スキーマ無変更の確認)
+3. 調査責任者:E2E成功後にT-112 PRをマージ → Claude CodeがT-102 音声抽出へ着手(基準時刻を先に確定してから解析へ進む)
 
 ## T-101実装の要点(レビュー観点)
 
@@ -102,7 +110,7 @@
 
 ## 実行したテスト/テスト結果
 
-- `pytest`:82件すべてパス(環境確認7件+DB27件+メディア登録19件+Drive取込15件+CLI14件)
+- `pytest`:88件すべてパス(環境確認7件+DB27件+メディア登録24件+Drive取込16件+CLI14件)
 - DBテスト内訳:空DBへの最新スキーマ構築/1バージョンずつの段階的マイグレーション/再実行の冪等性/外部キー有効化・integrity_check/正確座標列の不存在検査/不透明IDポリシー/UTCヘルパー/FK違反拒否/一意制約/enum CHECK拒否/SED由来・種候補なしAudioDetection保存/統合後の生スコア保持/ReferenceObservation精査情報+二重確認CHECK/review追記専用/analysis_run完了後凍結/run_event・access_log追記専用/DetectionLink確定に人の記録必須
 - `bio-observer-envcheck`:すべてOK(Python 3.11.15 / ffmpeg 6.1.1 / ffprobe 6.1.1 / 設定読み込み)
 - ライブラリ比較:birdnet 0.2.16・birdnet-analyzer 2.4.0のインストール・API検証(詳細はD-22)。推論は未実施(T-103申し送り)

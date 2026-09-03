@@ -377,6 +377,75 @@ def test_link_failure_with_other_errno_does_not_fall_back(
     assert _leftover_files(storage) == []
 
 
+@pytest.fixture(scope="module")
+def sample_video_with_creation_time(tmp_path_factory):
+    """動画内メタデータ creation_time を持つ合成動画(UTC表記)。"""
+    path = tmp_path_factory.mktemp("media") / "with_creation_time.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc=duration=1:size=160x120:rate=10",
+         "-c:v", "libx264", "-metadata", "creation_time=2026-07-29T08:01:00Z",
+         str(path)],
+        check=True, capture_output=True, timeout=120,
+    )
+    return path
+
+
+def test_normalize_utc_iso_variants():
+    from bio_observer.media_registry import normalize_utc_iso
+    assert normalize_utc_iso("2026-07-29T08:01:00.000000Z") == "2026-07-29T08:01:00Z"
+    assert normalize_utc_iso("2026-07-29T17:01:00+0900") == "2026-07-29T08:01:00Z"
+    assert normalize_utc_iso("2026-07-29T17:01:00+09:00") == "2026-07-29T08:01:00Z"
+    assert normalize_utc_iso("2026-07-29 08:01:00") == "2026-07-29T08:01:00Z"  # naiveはUTC扱い
+    assert normalize_utc_iso("not-a-date") is None
+    assert normalize_utc_iso(None) is None
+
+
+def test_recording_start_priority_metadata_first(db, seed, storage,
+                                                 sample_video_with_creation_time):
+    """優先1:動画内メタデータのcreation_timeを採用(取込元時刻・ファイル時刻より優先)。"""
+    result = register_media(db, sample_video_with_creation_time, seed["session"],
+                            storage=storage,
+                            origin_modified_time="2026-08-09T00:00:00Z")
+    row = db.execute("SELECT recording_started_at, recording_start_basis, "
+                     "recording_start_certainty FROM media_asset WHERE id = ?",
+                     (result.media_asset_id,)).fetchone()
+    assert tuple(row) == ("2026-07-29T08:01:00Z", "metadata", "estimated")
+    assert result.recording_start_source == "media_metadata_creation_time"
+    assert result.metadata.creation_time == "2026-07-29T08:01:00Z"
+
+
+def test_recording_start_priority_origin_modified_second(db, seed, storage, sample_video):
+    """優先2:creation_timeがなければ取込元(Drive等)の更新時刻を採用(basis=file_time)。"""
+    assert probe_media(sample_video).creation_time is None
+    result = register_media(db, sample_video, seed["session"], storage=storage,
+                            origin_modified_time="2026-08-09T01:02:03.456Z")
+    row = db.execute("SELECT recording_started_at, recording_start_basis, "
+                     "recording_start_certainty FROM media_asset WHERE id = ?",
+                     (result.media_asset_id,)).fetchone()
+    assert tuple(row) == ("2026-08-09T01:02:03Z", "file_time", "estimated")
+    assert result.recording_start_source == "origin_modified_time"
+
+
+def test_recording_start_priority_local_mtime_last(db, seed, storage, sample_video):
+    """優先3:creation_timeも取込元時刻もなければローカルファイル時刻(最後の手段)。"""
+    result = register_media(db, sample_video, seed["session"], storage=storage)
+    assert result.recording_start_source == "local_file_mtime"
+    assert result.recording_start_basis == "file_time"
+    assert result.recording_start_certainty == "estimated"
+
+
+def test_metadata_basis_cannot_be_confirmed_automatically(
+        db, seed, storage, sample_video_with_creation_time):
+    """自動取得(metadata)由来を confirmed として指定できない(人の補正のみ)。"""
+    with pytest.raises(ValueError):
+        register_media(db, sample_video_with_creation_time, seed["session"],
+                       storage=storage,
+                       recording_started_at="2026-07-29T08:01:00Z",
+                       recording_start_basis="metadata",
+                       recording_start_certainty="confirmed")
+
+
 def test_probe_media_reports_streams(sample_video, sample_wav):
     video_meta = probe_media(sample_video)
     assert (video_meta.media_type, video_meta.codec) == ("video", "h264")

@@ -410,6 +410,31 @@ def test_results_upload_is_idempotent(db, seed, storage, cfg, sample_bytes):
     assert set(results) == {"status.json", "summary.csv"}  # 増殖していない
 
 
+def test_ingest_uses_drive_modified_time_when_no_creation_time(
+        db, seed, storage, cfg, sample_bytes):
+    """T-112:creation_timeのない動画は Drive の modifiedTime を撮影開始日時の推定に使う
+    (ダウンロード時刻ではない)。採用根拠はイベントと status.json に記録される。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_time.MOV", sample_bytes,
+                         modified="2026-07-29T08:05:00.000Z")
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    media = db.execute("SELECT * FROM media_asset WHERE id = ?",
+                       (job["media_asset_id"],)).fetchone()
+    assert media["recording_started_at"] == "2026-07-29T08:05:00Z"
+    assert media["recording_start_basis"] == "file_time"
+    assert media["recording_start_certainty"] == "estimated"
+    registered = db.execute(
+        "SELECT detail_json FROM ingest_event WHERE ingest_job_id = ? "
+        "AND to_status = 'registered'", (job["id"],)).fetchone()
+    assert json.loads(registered["detail_json"])["recording_start_source"] == \
+        "origin_modified_time"
+    status = json.loads(drive.results_files(job["results_folder_name"])["status.json"])
+    assert status["recording_started_at"] == "2026-07-29T08:05:00Z"
+    assert status["recording_start_source"] == "origin_modified_time"
+
+
 def test_ingest_event_append_only(db, seed, cfg):
     drive = FakeDrive()
     drive.add_inbox_file("IMG_ev.MOV", b"x")

@@ -71,6 +71,15 @@ class MediaMetadata:
     sample_rate: int | None
     channels: int | None
     duration_seconds: float | None
+    # 動画内メタデータの作成日時(UTC ISO-8601 "…Z" へ正規化済み。なければ None)
+    creation_time: str | None = None
+
+
+# 撮影開始日時の自動推定に採用した根拠(RegistrationResult.recording_start_source)
+SOURCE_CALLER = "caller"                      # 呼び出し側の指定(人の入力・補正を含む)
+SOURCE_MEDIA_METADATA = "media_metadata_creation_time"  # 優先1:動画内メタデータ
+SOURCE_ORIGIN_MODIFIED = "origin_modified_time"         # 優先2:取込元(Drive等)の更新時刻
+SOURCE_LOCAL_MTIME = "local_file_mtime"                 # 優先3:ローカルファイル時刻
 
 
 @dataclass(frozen=True)
@@ -79,6 +88,51 @@ class RegistrationResult:
     sha256: str
     relative_path: str
     metadata: MediaMetadata
+    recording_started_at: str | None = None
+    recording_start_basis: str | None = None
+    recording_start_certainty: str | None = None
+    recording_start_source: str = SOURCE_CALLER
+
+
+_ISO_UTC = "%Y-%m-%dT%H:%M:%SZ"
+_CREATION_TIME_TAGS = ("creation_time", "com.apple.quicktime.creationdate")
+
+
+def normalize_utc_iso(value: str | None) -> str | None:
+    """各種表記の日時文字列を UTC ISO-8601("YYYY-MM-DDTHH:MM:SSZ")へ正規化する。
+
+    受理:ISO-8601(Z / ±HH:MM / ±HHMM / 小数秒あり)、"YYYY-MM-DD HH:MM:SS"。
+    タイムゾーンのない値は UTC とみなす(FFmpegのcreation_timeはUTC表記が慣例。
+    採用時は根拠を記録し、確実性は estimated に留める=D-26/T-112)。
+    解釈できない値は None。
+    """
+    if not value:
+        return None
+    text = value.strip()
+    if text.endswith("Z") or text.endswith("z"):
+        text = text[:-1] + "+00:00"
+    if len(text) >= 5 and text[-5] in "+-" and text[-3] != ":" and text[-4:].isdigit():
+        text = text[:-2] + ":" + text[-2:]  # ±HHMM → ±HH:MM
+    text = text.replace(" ", "T", 1)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).strftime(_ISO_UTC)
+
+
+def _extract_creation_time(data: dict) -> str | None:
+    """format tags → 各stream tags の順で作成日時タグを探し、UTC ISO へ正規化する。"""
+    candidates = [data.get("format", {}).get("tags") or {}]
+    candidates += [s.get("tags") or {} for s in data.get("streams", [])]
+    for tags in candidates:
+        for key in _CREATION_TIME_TAGS:
+            normalized = normalize_utc_iso(tags.get(key))
+            if normalized:
+                return normalized
+    return None
 
 
 def probe_media(source: str | Path, *, ffprobe: str = "ffprobe") -> MediaMetadata:
@@ -123,6 +177,7 @@ def probe_media(source: str | Path, *, ffprobe: str = "ffprobe") -> MediaMetadat
         sample_rate=int(audio["sample_rate"]) if audio and audio.get("sample_rate") else None,
         channels=audio.get("channels") if audio else None,
         duration_seconds=float(duration) if duration is not None else None,
+        creation_time=_extract_creation_time(data),
     )
 
 
@@ -245,6 +300,26 @@ def _validate_recording_start(
         )
 
 
+def _estimate_recording_start(
+    metadata: MediaMetadata,
+    origin_modified_time: str | None,
+    local_mtime_iso: str,
+) -> tuple[str, str, str, str]:
+    """撮影開始日時の自動推定(T-112の優先順位)。戻り値:(日時, basis, certainty, source)。
+
+    1. 動画内メタデータの creation_time(basis=metadata)
+    2. 取込元(Drive等)の更新時刻(basis=file_time)
+    3. ローカルファイル時刻(basis=file_time。最後の手段)
+    自動推定は常に certainty='estimated'(confirmed は人の入力・補正のみ=D-26)。
+    """
+    if metadata.creation_time:
+        return metadata.creation_time, "metadata", "estimated", SOURCE_MEDIA_METADATA
+    origin = normalize_utc_iso(origin_modified_time)
+    if origin:
+        return origin, "file_time", "estimated", SOURCE_ORIGIN_MODIFIED
+    return local_mtime_iso, "file_time", "estimated", SOURCE_LOCAL_MTIME
+
+
 def register_media(
     conn: sqlite3.Connection,
     source: str | Path,
@@ -254,6 +329,7 @@ def register_media(
     recording_started_at: str | None = None,
     recording_start_basis: str | None = None,
     recording_start_certainty: str | None = None,
+    origin_modified_time: str | None = None,
     tz: str | None = None,
     note: str | None = None,
 ) -> RegistrationResult:
@@ -263,8 +339,10 @@ def register_media(
     - 保存先パスは不透明IDのみで構成(元ファイル名を使わない)
     - 既存ファイルとの衝突時は、既存ファイルに一切触れず失敗する。例外時に
       削除するのは本呼出しが作成したファイルのみ(D-26)
-    - 撮影開始日時が未指定の場合、ファイル更新時刻から basis='file_time'・
-      certainty='estimated' として推定する(確定として自動断定しない。D-26)
+    - 撮影開始日時が未指定の場合は自動推定する(T-112の優先順位:
+      動画内メタデータ creation_time → 取込元の更新時刻 origin_modified_time
+      (Drive の modifiedTime 等)→ ローカルファイル時刻)。自動推定は常に
+      certainty='estimated'(確定として自動断定しない。D-26)
     - 失敗時はDB行・コピー先ファイルを残さない
 
     トランザクション契約:本関数は接続のトランザクション所有者として振る舞い、
@@ -279,16 +357,17 @@ def register_media(
     if ext not in SUPPORTED_EXTENSIONS:
         raise ProbeError(f"対応形式ではありません: {ext}(対応: {sorted(SUPPORTED_EXTENSIONS)})")
 
-    # 撮影開始日時(未指定ならファイル更新時刻からの推定 = estimated)
+    # 撮影開始日時(未指定なら優先順位に従って自動推定 = estimated)
     _validate_recording_start(recording_start_basis, recording_start_certainty)
     file_mtime_iso = (
         datetime.fromtimestamp(source.stat().st_mtime, tz=timezone.utc)
-        .isoformat(timespec="seconds").replace("+00:00", "Z")
+        .strftime(_ISO_UTC)
     )
+    recording_start_source = SOURCE_CALLER
     if recording_started_at is None:
-        recording_started_at = file_mtime_iso
-        recording_start_basis = "file_time"
-        recording_start_certainty = "estimated"
+        (recording_started_at, recording_start_basis, recording_start_certainty,
+         recording_start_source) = _estimate_recording_start(
+            metadata, origin_modified_time, file_mtime_iso)
 
     # 保存先(不透明IDのみでパスを構成)
     project_id, site_id, station_id = _session_chain(conn, survey_session_id)
@@ -365,4 +444,8 @@ def register_media(
         sha256=sha256,
         relative_path=relative_path,
         metadata=metadata,
+        recording_started_at=recording_started_at,
+        recording_start_basis=recording_start_basis,
+        recording_start_certainty=recording_start_certainty,
+        recording_start_source=recording_start_source,
     )

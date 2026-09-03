@@ -1,5 +1,14 @@
 # 変更履歴(CHANGELOG.md)
 
+## 2026-08-09(T-112 撮影開始時刻の根拠優先順位。Issue #12)
+
+- probe_media が動画内メタデータの creation_time(format/stream tags、com.apple.quicktime.creationdate も対象)を取得しUTCへ正規化(`normalize_utc_iso`:Z/±HH:MM/±HHMM/小数秒/空白区切り、TZなしはUTC扱い)
+- register_media の自動推定を優先順位化:①creation_time(metadata)→②取込元の更新時刻 `origin_modified_time`(file_time)→③ローカルファイル時刻(file_time)。自動推定は常にestimated、confirmedは人の入力・補正のみ(D-26維持)
+- 採用根拠(recording_start_source)を RegistrationResult・ingest_event(registered遷移)・results/<job_id>/status.json に記録(スキーマ変更なし)
+- 取込ワーカーは Drive の modifiedTime を優先順位2として渡す(ダウンロード時刻への依存を解消)
+- worker の再取得コードをヘルパー化(_reload)。docs/WINDOWS_E2E.md に観察項目(recording_started_at・実撮影時刻との差・basis・certainty・source)を追加
+- テスト6件追加(全88件パス)。D-26追記、DATA_MODEL.md 3.5更新
+
 ## 2026-08-09(T-111レビュー対応:dry-runの完全読み取り専用化・ロック取得の前倒し)
 
 - dry-run/statusをSQLite読み取り専用接続(mode=ro URI)へ変更。DB未初期化でもDBファイルを作成せず案内して終了(migrationも走らない)

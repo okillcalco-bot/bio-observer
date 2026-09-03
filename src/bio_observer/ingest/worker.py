@@ -84,6 +84,11 @@ def _fail_or_retry(conn: sqlite3.Connection, job: sqlite3.Row, cfg: DriveIngestC
     return "retry_required"
 
 
+def _reload(conn: sqlite3.Connection, job_id: str) -> sqlite3.Row:
+    """遷移後の最新ジョブ行を取り直す。"""
+    return conn.execute("SELECT * FROM ingest_job WHERE id = ?", (job_id,)).fetchone()
+
+
 def _tmp_dir(storage: StorageConfig) -> Path:
     path = storage.data_root / "ingest_tmp"
     path.mkdir(parents=True, exist_ok=True)
@@ -199,6 +204,8 @@ def _register(conn: sqlite3.Connection, storage: StorageConfig,
     try:
         result = register_media(
             conn, downloaded, job["survey_session_id"], storage=storage,
+            # 優先順位2(T-112):Drive上の更新時刻。動画内creation_timeがあればそちらが優先
+            origin_modified_time=job["modified_time"],
             note=f"ingest:{job['id']}",
         )
     except DuplicateMediaError as exc:
@@ -210,7 +217,11 @@ def _register(conn: sqlite3.Connection, storage: StorageConfig,
         downloaded.unlink(missing_ok=True)
         return
     _transition(conn, job["id"], "registered", message="MediaAsset登録完了",
-                detail={"sha256": result.sha256},
+                detail={"sha256": result.sha256,
+                        "recording_started_at": result.recording_started_at,
+                        "recording_start_basis": result.recording_start_basis,
+                        "recording_start_certainty": result.recording_start_certainty,
+                        "recording_start_source": result.recording_start_source},
                 media_asset_id=result.media_asset_id)
     downloaded.unlink(missing_ok=True)  # 原本はoriginals/とDrive上に存在
 
@@ -226,6 +237,12 @@ def _upload_results(conn: sqlite3.Connection, client: DriveClient,
     media_id = job["media_asset_id"] or job["duplicate_of_media_asset_id"]
     if media_id:
         media = conn.execute("SELECT * FROM media_asset WHERE id = ?", (media_id,)).fetchone()
+    # 登録時に採用した撮影開始日時の根拠(registered遷移のdetailから。重複ジョブはなし)
+    registered = conn.execute(
+        "SELECT detail_json FROM ingest_event WHERE ingest_job_id = ? "
+        "AND to_status = 'registered' ORDER BY rowid DESC LIMIT 1", (job["id"],)
+    ).fetchone()
+    recording = json.loads(registered["detail_json"]) if registered and registered["detail_json"] else {}
 
     tmp = _tmp_dir(storage)
     status_path = tmp / f"{job['id']}_status.json"
@@ -238,6 +255,10 @@ def _upload_results(conn: sqlite3.Connection, client: DriveClient,
             "media_asset_id": job["media_asset_id"],
             "duplicate_of_media_asset_id": job["duplicate_of_media_asset_id"],
             "sha256": media["sha256"] if media else None,
+            "recording_started_at": media["recording_started_at"] if media else None,
+            "recording_start_basis": media["recording_start_basis"] if media else None,
+            "recording_start_certainty": media["recording_start_certainty"] if media else None,
+            "recording_start_source": recording.get("recording_start_source"),
             "status": "completed",
             "retry_count": job["retry_count"],
             "generated_at": utc_now_iso(),
@@ -289,32 +310,30 @@ def process_pending(conn: sqlite3.Connection, client: DriveClient,
                 _transition(conn, job_id, "waiting_for_upload")
                 status = "waiting_for_upload"
             if status == "waiting_for_upload":
-                job = conn.execute("SELECT * FROM ingest_job WHERE id = ?", (job_id,)).fetchone()
+                job = _reload(conn, job_id)
                 if not _check_upload_stable(conn, client, cfg, job):
                     summary.waiting += 1
                     continue
                 _transition(conn, job_id, "downloading", message="アップロード完了を確認")
                 status = "downloading"
             if status == "downloading":
-                job = conn.execute("SELECT * FROM ingest_job WHERE id = ?", (job_id,)).fetchone()
+                job = _reload(conn, job_id)
                 _download(conn, client, cfg, storage, job)
                 _transition(conn, job_id, "downloaded", message="ダウンロード・サイズ検証完了")
                 status = "downloaded"
             if status == "downloaded":
-                job = conn.execute("SELECT * FROM ingest_job WHERE id = ?", (job_id,)).fetchone()
+                job = _reload(conn, job_id)
                 downloaded = _tmp_dir(storage) / f"{job_id}{_job_ext(job)}"
                 if not downloaded.exists():
                     # 一時ファイル不在(手動削除・別領域の消失等)は詰まらせず再取得する
                     _transition(conn, job_id, "downloading",
                                 message="ダウンロード済みファイル不在のため再取得")
-                    job = conn.execute("SELECT * FROM ingest_job WHERE id = ?",
-                                       (job_id,)).fetchone()
+                    job = _reload(conn, job_id)
                     downloaded = _download(conn, client, cfg, storage, job)
                     _transition(conn, job_id, "downloaded", message="再取得完了")
-                    job = conn.execute("SELECT * FROM ingest_job WHERE id = ?",
-                                       (job_id,)).fetchone()
+                    job = _reload(conn, job_id)
                 _register(conn, storage, job, downloaded)
-                job = conn.execute("SELECT * FROM ingest_job WHERE id = ?", (job_id,)).fetchone()
+                job = _reload(conn, job_id)
                 status = job["status"]  # registered または uploading_results(重複)
             if status == "registered":
                 _transition(conn, job_id, "queued")
@@ -322,23 +341,23 @@ def process_pending(conn: sqlite3.Connection, client: DriveClient,
             if status == "queued":
                 if analysis_hook is not None:
                     _transition(conn, job_id, "analyzing")
-                    job = conn.execute("SELECT * FROM ingest_job WHERE id = ?", (job_id,)).fetchone()
+                    job = _reload(conn, job_id)
                     analysis_hook(conn, job)
                 status = "uploading_results"
                 _transition(conn, job_id, "uploading_results")
             if status == "analyzing":  # 再開:hook実行途中でのクラッシュ
                 if analysis_hook is not None:
-                    job = conn.execute("SELECT * FROM ingest_job WHERE id = ?", (job_id,)).fetchone()
+                    job = _reload(conn, job_id)
                     analysis_hook(conn, job)
                 _transition(conn, job_id, "uploading_results")
                 status = "uploading_results"
             if status == "uploading_results":
-                job = conn.execute("SELECT * FROM ingest_job WHERE id = ?", (job_id,)).fetchone()
+                job = _reload(conn, job_id)
                 _upload_results(conn, client, cfg, storage, job)
                 _transition(conn, job_id, "completed", message="結果返却完了")
                 summary.completed += 1
         except (OSError, MediaRegistrationError, sqlite3.DatabaseError) as exc:
-            job = conn.execute("SELECT * FROM ingest_job WHERE id = ?", (job_id,)).fetchone()
+            job = _reload(conn, job_id)
             resume = job["status"] if job["status"] in RETRYABLE_STATUSES else "waiting_for_upload"
             outcome = _fail_or_retry(conn, job, cfg, resume, f"{type(exc).__name__}: {exc}")
             if outcome == "failed":

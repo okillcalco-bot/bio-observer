@@ -80,9 +80,9 @@ bio-observer status
 
 ### 観察項目(合否外。T-112の改善効果の比較基準として記録)
 
-現状、Drive経由の取込では `recording_started_at` がダウンロード時刻に近い推定値になる既知事項がある(改善はIssue #12=T-112。撮影時刻の根拠優先順位:①動画内メタデータcreation_time→②Drive modifiedTime→③ローカル一時ファイル時刻→④人による補正・確定。自動取得は原則estimated、人の確認・補正のみconfirmed)。
+撮影開始日時は自動推定(T-112の優先順位:①動画内メタデータcreation_time→②Drive modifiedTime→③ローカル一時ファイル時刻。自動取得は原則estimated、④人の確認・補正のみconfirmed)。T-112マージ前のmainで実行した場合は③(ダウンロード時刻に近い値)になる既知事項があるため、どの根拠が採用されたか(`status.json` の `recording_start_source`)とあわせて記録する。
 
-`results/<job_id>/summary.csv` から以下を記録しておく:
+`results/<job_id>/summary.csv`・`status.json` から以下を記録しておく:
 
 | 観察項目 | IMG_3355 | IMG_3356 |
 |---|---|---|
