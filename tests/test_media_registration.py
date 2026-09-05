@@ -568,6 +568,29 @@ def test_metadata_basis_cannot_be_confirmed_automatically(
                        recording_start_certainty="confirmed")
 
 
+def test_caller_recording_time_is_validated_before_copy(db, seed, storage, sample_video):
+    """T-113:呼び出し側指定の日時はコピー前に検証・正規化する。"""
+    # 表記なし(timezone_unknown)はコピー前に ValueError(残骸なし)
+    with pytest.raises(ValueError, match="timezone_unknown"):
+        register_media(db, sample_video, seed["session"], storage=storage,
+                       recording_started_at="2026-08-01 09:00:00",
+                       recording_start_basis="manual")
+    assert _leftover_files(storage) == []
+    # 解釈不能も同様
+    with pytest.raises(ValueError, match="invalid"):
+        register_media(db, sample_video, seed["session"], storage=storage,
+                       recording_started_at="yesterday", recording_start_basis="manual")
+    # オフセット付きはUTCへ正規化して保存(従来はINSERT時のCHECK違反)
+    result = register_media(db, sample_video, seed["session"], storage=storage,
+                            recording_started_at="2026-08-01T09:00:00+09:00",
+                            recording_start_basis="manual",
+                            recording_start_certainty="confirmed")
+    row = db.execute("SELECT recording_started_at FROM media_asset WHERE id = ?",
+                     (result.media_asset_id,)).fetchone()
+    assert row[0] == "2026-08-01T00:00:00Z"
+    assert result.recording_start_source == "caller"
+
+
 def test_probe_media_reports_streams(sample_video, sample_wav):
     video_meta = probe_media(sample_video)
     assert (video_meta.media_type, video_meta.codec) == ("video", "h264")

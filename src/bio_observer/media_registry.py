@@ -501,7 +501,16 @@ def register_media(
     file_mtime_iso = datetime.fromtimestamp(local_mtime, tz=timezone.utc).strftime(_ISO_UTC)
     recording_start_source = SOURCE_CALLER
     candidates: list[dict] = []
-    if recording_started_at is None:
+    if recording_started_at is not None:
+        # 呼び出し側指定の日時はコピー前に検証・正規化する(表記なし・解釈不能は早期拒否。
+        # 従来はINSERT時のCHECK違反として遅く失敗していた。T-113)
+        parsed = parse_timestamp(recording_started_at, naive_timezone=naive_timezone,
+                                 naive_timezone_origin=naive_timezone_origin)
+        if parsed.normalized_value is None:
+            raise ValueError(
+                f"recording_started_at を解釈できません({parsed.timezone}: {parsed.interpretation})")
+        recording_started_at = parsed.normalized_value
+    else:
         candidates = evaluate_recording_start_candidates(
             metadata, origin_modified_time, local_mtime,
             naive_timezone=naive_timezone, naive_timezone_origin=naive_timezone_origin)

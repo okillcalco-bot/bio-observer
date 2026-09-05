@@ -443,6 +443,68 @@ def test_ingest_uses_drive_modified_time_when_no_creation_time(
     assert candidates[2]["adopted"] is False and candidates[2]["rejection_reason"]
 
 
+def test_non_oserror_exception_is_isolated_per_job(db, seed, storage, cfg, sample_bytes):
+    """T-113:Drive API等の任意例外(OSError以外)でも継続実行が止まらず再試行対象になる。"""
+    drive = FakeDrive()
+    bad = drive.add_inbox_file("IMG_bad.MOV", sample_bytes)
+    drive.add_inbox_file("IMG_ok.MOV", sample_bytes + b"\x00")  # 別内容(ハッシュが異なる)
+    original_download = drive.download_file
+
+    class FakeHttpError(Exception):  # googleapiclient.errors.HttpError はOSErrorではない
+        pass
+
+    def download(file_id, dest):
+        if file_id == bad:
+            raise FakeHttpError("<HttpError 500 when requesting .../files/%s?alt=media>" % bad)
+        return original_download(file_id, dest)
+
+    drive.download_file = download
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])  # 例外が伝播しない
+    assert summary.retrying == 1 and summary.completed == 1
+    statuses = {j["original_file_name"]: j["status"]
+                for j in db.execute("SELECT original_file_name, status FROM ingest_job")}
+    assert statuses == {"IMG_bad.MOV": "retry_required", "IMG_ok.MOV": "completed"}
+    assert "FakeHttpError" in db.execute(
+        "SELECT error FROM ingest_job WHERE original_file_name = 'IMG_bad.MOV'").fetchone()[0]
+
+
+def test_polling_error_does_not_consume_retries(db, seed, storage, cfg, sample_bytes):
+    """T-113:完了待ち段階の通信エラーは再試行回数を消費せず待機を継続する。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_poll.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    original_info = drive.get_file_info
+    drive.get_file_info = lambda fid: (_ for _ in ()).throw(OSError("network down"))
+    for _ in range(cfg.max_retries + 2):  # 上限を超える回数の失敗
+        summary = run_cycle(db, drive, cfg, storage, seed["session"])
+        assert summary.waiting == 1 and summary.failed == 0 and summary.retrying == 0
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert job["status"] == "waiting_for_upload" and job["retry_count"] == 0
+    assert "network down" in job["error"]
+    assert _events(db, job["id"]).count("waiting_for_upload") >= cfg.max_retries + 2
+    # 通信が回復すれば通常どおり完了する
+    drive.get_file_info = original_info
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    assert summary.completed == 1
+
+
+def test_stability_probe_without_observed_at_is_tolerated(db, seed, storage, cfg, sample_bytes):
+    """T-113(補助):observed_at のない probe(旧形式・手動編集)で KeyError にならない。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_probe.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    job_id = db.execute("SELECT id FROM ingest_job").fetchone()["id"]
+    db.execute("UPDATE ingest_job SET stable_probe_json = ? WHERE id = ?",
+               (json.dumps({"size": len(sample_bytes), "modified": "2026-08-09T00:00:00Z",
+                            "confirmations": 1}), job_id))
+    db.commit()
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    assert summary.failed == 0  # 例外にならず数え直し(次サイクルで成立)
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    assert summary.completed == 1
+
+
 def test_ingest_event_append_only(db, seed, cfg):
     drive = FakeDrive()
     drive.add_inbox_file("IMG_ev.MOV", b"x")

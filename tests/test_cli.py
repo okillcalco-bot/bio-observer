@@ -236,6 +236,69 @@ def test_inspect_time_is_read_only_and_shows_candidates(env, capsys, tmp_path, s
     assert not _db_file(env).exists()  # DBを作らない
 
 
+def test_run_reports_client_init_failure_without_traceback(env, capsys):
+    """T-113:OAuth初期化失敗は1行の案内で exit 1(トレースバックで落ちない)。"""
+    session = _setup_session(capsys)
+
+    def broken_factory():
+        raise FileNotFoundError("credentials.json not found")
+
+    code = main(["run", "--session", session, "--once"], client_factory=broken_factory)
+    out = capsys.readouterr().out
+    assert code == 1 and "Driveクライアントの初期化に失敗" in out
+
+
+def test_run_interval_survives_cycle_failure(env, capsys, monkeypatch):
+    """T-113:継続実行は1サイクルの失敗(受け箱一覧の通信エラー等)で停止しない。"""
+    session = _setup_session(capsys)
+    calls = {"n": 0}
+
+    def flaky_cycle(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("listing failed: folders/inbox")
+        raise KeyboardInterrupt  # 2回目で利用者が停止
+
+    monkeypatch.setattr(worker, "run_cycle", flaky_cycle)
+    monkeypatch.setattr("bio_observer.cli.time.sleep", lambda s: None)
+    code = main(["run", "--session", session, "--interval", "1"],
+                client_factory=lambda: FakeDrive())
+    out = capsys.readouterr().out
+    assert code == 0 and calls["n"] == 2
+    assert "サイクル失敗" in out and "再試行します" in out
+    assert "folders/inbox" not in out and "inbo…" in out  # フォルダIDは伏せられる
+
+
+def test_run_once_returns_1_on_cycle_failure(env, capsys, monkeypatch):
+    session = _setup_session(capsys)
+    monkeypatch.setattr(worker, "run_cycle",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert main(["run", "--session", session, "--once"],
+                client_factory=lambda: FakeDrive()) == 1
+
+
+def test_setup_rejects_precise_coordinates(env, capsys):
+    """T-113:地点名・丸め位置に正確な座標と解釈できる値を入力できない(D-12)。"""
+    # 値はすべて架空(実在地点の座標ではない)
+    for args in (["--site", "地点 12.34567,123.45678"],
+                 ["--rounded-position", "12.345"],
+                 ["--station", "ST 12°01'23\""],
+                 ["--site", "岬 12.34N 123.45E"]):
+        base = ["setup", "--project", "P", "--site", "A", "--station", "ST-1",
+                "--survey-date", "2026-08-01"]
+        if args[0] in base:
+            base[base.index(args[0]) + 1] = args[1]
+        else:
+            base = base + args
+        code = main(base)
+        out = capsys.readouterr().out
+        assert code == 1 and "正確な座標" in out, args
+    assert not _db_file(env).exists()  # 拒否時はDBへ触れない
+    # 丸め表現(メッシュコード等の整数表記)は許可
+    assert main(["setup", "--project", "P", "--site", "A", "--station", "ST-1",
+                 "--survey-date", "2026-08-01", "--rounded-position", "5339-23"]) == 0
+
+
 def test_interval_must_be_positive(env, capsys):
     for bad in ("0", "-5", "abc"):
         with pytest.raises(SystemExit) as exc:

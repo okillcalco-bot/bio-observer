@@ -222,6 +222,17 @@ with birdnet.AcousticPredictionSession(model) as s:
 - **排他ロックの取得順序**:非dry-runの run は「.env設定確認の直後・DB接続/マイグレーション/OAuth client生成の前」にロックを取得する。二重起動した後発プロセスは、拒否されるまでにDB・tokenへ一切触れない(テストで検証:client_factory不呼出し・DBファイル不作成)。
 - **--interval の入力制約**:1以上の整数のみ受理(argparse型検証)。0・負数・非整数は引数エラーとし、API連打・実行時例外を防ぐ。
 
+### D-29:取込ワーカー・CLIの堅牢性修正(T-113)
+- 日付:2026-09-05/決定者:Claude Code(T-113)/Issue #14
+- 前提:**DBスキーマ・既存データ・状態機械(D-27)・時刻ポリシー(D-26/T-112)・CLI仕様(D-28)は変更しない**。修正はアプリ層(例外処理・再試行・入力検証・表示)に限定する。
+- **ジョブ単位の例外隔離**:process_pending のジョブごとの捕捉範囲を `Exception` へ広げる(従来は OSError / MediaRegistrationError / sqlite3.DatabaseError のみで、Drive API の HttpError 等は run_cycle 全体を停止させ、他ジョブの処理と継続実行が止まっていた)。KeyboardInterrupt / SystemExit は BaseException のため従来どおり通す(Ctrl+C安全停止=D-28を維持)。
+- **完了待ち段階の失敗は再試行回数を消費しない**:waiting_for_upload での失敗(一時的な通信エラー等)は `retry_count` を増やさず、同状態への遷移として error と message を IngestEvent に記録して待機を継続する。上限到達による failed 判定は、ダウンロード以降(実際に処理を開始した段階)の失敗に限定する。理由:アップロード完了待ちは数時間に及び得るため、通信断の回数で放棄すると4時間動画の運用が成り立たない。
+- **安定確認 probe の防御**:`stable_probe_json` に observed_at が無い場合(旧形式・手動編集)は KeyError にせず基準時刻を再設定して数え直す。
+- **常駐ループの継続**:CLI run は 1 サイクルの失敗(受け箱一覧取得の通信エラー等)で常駐を終了せず、次の interval で再試行する。`--once` では失敗を exit 1 で返す。Drive クライアント初期化(OAuth・credentials 不備)の失敗はトレースバックではなく1行の案内と exit 1 とする。
+- **エラー表示の秘匿**:例外文言に含まれる受け箱・結果フォルダIDはマスク(先頭4文字)して表示する(HttpError はリクエストURLにフォルダIDを含むため。SECURITY.md)。
+- **正確座標に見える入力の拒否**:setup の --project/--site/--station/--rounded-position に、小数3桁以上の度表記(35.123 等)・度記号(°)・方位付き数値(34.98N 等)が含まれる場合はDBへ触れる前に拒否する(D-12 の運用上の防御。メッシュコード等の整数表記は許可)。完全な座標検出ではなく、明らかな誤入力を防ぐ最小限のパターンとする。
+- **呼び出し側指定の撮影開始時刻の早期検証**:register_media へ渡された recording_started_at は parse_timestamp でコピー前に検証・UTC正規化する(表記なし=timezone_unknown・解釈不能=invalid は ValueError)。従来はコピー後の INSERT 時に CHECK 違反として遅く失敗しており、オフセット付き(+09:00)の正しい値も拒否されていた。T-112 の解釈条件(BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE)は自動推定と同じ規則で適用する。
+
 ---
 
 ## 旧・判断待ち事項の決定(P-1〜P-8 → D-14〜D-21)

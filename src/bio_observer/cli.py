@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -48,6 +49,27 @@ def _configure_windows_console() -> None:
 def _mask(value: str) -> str:
     """識別子のマスク表示(先頭4文字のみ。アクセス権を与えうる値を全表示しない)。"""
     return f"{value[:4]}…(設定済み)" if len(value) > 4 else "(設定済み)"
+
+
+def _redact(exc: BaseException, cfg: DriveIngestConfig) -> str:
+    """例外文言からDriveフォルダIDを伏せる(HttpErrorはリクエストURLを含むため)。"""
+    text = f"{type(exc).__name__}: {exc}"
+    for secret in {cfg.inbox_folder_id, cfg.results_parent_folder_id}:
+        if secret:
+            text = text.replace(secret, _mask(secret))
+    return text
+
+
+# 正確な座標に見える入力を拒否する(SECURITY.md / D-12。メッシュコード等の整数表記は許可)
+_COORDINATE_PATTERNS = (
+    re.compile(r"-?\d{1,3}\.\d{3,}"),                 # 小数3桁以上の度表記(例 35.123)
+    re.compile(r"[°º]"),                              # 度記号(DMS表記)
+    re.compile(r"\b\d{1,3}(\.\d+)?\s*[NSEW]\b", re.I),  # 35.6N / 139E 等
+)
+
+
+def _looks_like_precise_coordinate(value: str | None) -> bool:
+    return bool(value) and any(p.search(value) for p in _COORDINATE_PATTERNS)
 
 
 def _open_db(storage: StorageConfig) -> sqlite3.Connection:
@@ -104,6 +126,13 @@ def _get_or_create(conn, table: str, where: dict, defaults: dict, prefix: str
 
 
 def cmd_setup(args) -> int:
+    for label, value in (("--project", args.project), ("--site", args.site),
+                         ("--station", args.station),
+                         ("--rounded-position", args.rounded_position)):
+        if _looks_like_precise_coordinate(value):
+            print(f"[NG] {label} に正確な座標と解釈できる値が含まれています。"
+                  "地点名・丸め位置には座標を入れず、メッシュコード等の丸め表現を使ってください(D-12)")
+            return 1
     storage = StorageConfig.load()
     conn = _open_db(storage)
     try:
@@ -262,13 +291,25 @@ def cmd_run(args, client_factory) -> int:
                 print(f"[NG] SurveySessionがありません: {args.session}"
                       "(bio-observer setup で作成してください)")
                 return 1
-            client = client_factory()
+            try:
+                client = client_factory()
+            except Exception as exc:  # noqa: BLE001 — OAuth/設定不備を1行で案内
+                print(f"[NG] Driveクライアントの初期化に失敗: {_redact(exc, cfg)}")
+                print("     credentials/token のパスと初回認可(ブラウザ)を確認してください")
+                return 1
             while True:
-                summary = worker.run_cycle(conn, client, cfg, storage, args.session)
-                print(f"{utc_now_iso()} サイクル完了")
-                _print_summary(summary)
-                if args.once:
-                    return 0
+                try:
+                    summary = worker.run_cycle(conn, client, cfg, storage, args.session)
+                except Exception as exc:  # noqa: BLE001 — 1サイクルの失敗で常駐を止めない
+                    print(f"{utc_now_iso()} サイクル失敗: {_redact(exc, cfg)}")
+                    if args.once:
+                        return 1
+                    print(f"  {args.interval}秒後に再試行します(状態はDBへ保存済み)")
+                else:
+                    print(f"{utc_now_iso()} サイクル完了")
+                    _print_summary(summary)
+                    if args.once:
+                        return 0
                 time.sleep(args.interval)
         except KeyboardInterrupt:
             print("\n停止しました(Ctrl+C)。状態はDBへ保存済みのため、"

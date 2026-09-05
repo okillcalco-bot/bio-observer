@@ -1,5 +1,15 @@
 # 変更履歴(CHANGELOG.md)
 
+## 2026-09-05(T-113 取込ワーカー・CLIの堅牢性修正。Issue #14。スキーマ変更なし)
+
+- ワーカー:ジョブ単位の例外捕捉を `Exception` へ拡大(Drive API の HttpError 等で run_cycle 全体が停止していた)。KeyboardInterrupt は従来どおり通す
+- ワーカー:waiting_for_upload 段階の失敗は retry_count を消費せず待機継続(IngestEvent に error を記録)。failed 判定はダウンロード以降の失敗に限定
+- ワーカー:stable_probe_json に observed_at が無い場合の KeyError を防止(数え直し)
+- CLI run:1サイクルの失敗で常駐を止めず次の interval で再試行(--once は exit 1)。Drive クライアント初期化失敗は1行案内+exit 1。例外文言中のフォルダIDをマスク表示
+- CLI setup:正確な座標と解釈できる入力(小数3桁以上の度表記・度記号・方位付き数値)をDBへ触れる前に拒否(D-12)
+- register_media:呼び出し側指定の recording_started_at をコピー前に検証・UTC正規化(表記なし・解釈不能は ValueError。+09:00 等は正規化して保存)
+- テスト8件追加(全100件パス)。DB・既存データ・設計方針(D-26〜D-28)は無変更。D-29
+
 ## 2026-09-06(T-112再レビュー対応:動画内タグの順次評価。Issue #12)
 
 - probe_media が作成日時タグを format tags → 各 stream tags の探索順で**すべて**取得(`MediaMetadata.creation_time_tags`)。候補評価は各タグを候補①として順に評価し、先頭が不正でも後続の有効タグを採用(以前は1件目で打ち切り、Drive modifiedTime へ落ちていた)。候補記録に `order` を追加(priority は優先順位の段のまま)

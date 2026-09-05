@@ -1,13 +1,21 @@
 # AI引き継ぎ(AI_HANDOFF.md)
 
-- 最終更新:2026-08-09/更新者:Claude Code(T-003)
+- 最終更新:2026-09-05/更新者:Claude Code(T-113)
 - Claude Code・Codexは作業開始前に PROJECT_CHARTER.md・本文書・TASKS.md を確認し、作業終了時に本文書と TASKS.md を更新すること。
 
 ---
 
 ## 現在の状態
 
-フェーズ1(音声パイプライン)。基盤(設計→DB→メディア登録→Drive取込→CLI)はmain 89b8050までマージ済み(T-111 PR #11、Issue #10クローズ)。T-112(撮影開始時刻の根拠優先順位)を実装完了し、Codexレビュー待ち(Issue #12、ブランチ claude/t112-recording-time-basis)。Windows解析PCでの短尺2本の実Drive E2E(docs/WINDOWS_E2E.md)は利用者が実施中。音声抽出(T-102)・BirdNET/SED(T-103)・映像検出・UIは未実装。
+フェーズ1(音声パイプライン)。基盤(設計→DB→メディア登録→Drive取込→CLI)はmain 89b8050までマージ済み(T-111 PR #11、Issue #10クローズ)。T-112(撮影開始時刻の根拠優先順位)を実装完了し、Codexレビュー待ち(Issue #12、PR #13、ブランチ claude/t112-recording-time-basis)。その上にT-113(取込ワーカー・CLIの堅牢性修正。Issue #14、ブランチ claude/t113-ingest-robustness、base=T-112ブランチ)を積み、Codexレビュー待ち。Windows解析PCでの短尺2本の実Drive E2E(docs/WINDOWS_E2E.md)は利用者が実施中。音声抽出(T-102)・BirdNET/SED(T-103)・映像検出・UIは未実装。
+
+## T-113実装の要点(レビュー観点。D-29)
+
+- **前提**:DBスキーマ(0001/0002)・既存データ・状態機械・時刻ポリシー・CLI仕様は無変更。修正は再現した不具合(回帰テストで再現→修正)に限定
+- `ingest/worker.py`:ジョブ単位の except を `Exception` へ拡大(Drive API HttpError 等で run_cycle が停止し他ジョブも止まっていた)。waiting_for_upload 段階の失敗は retry_count を消費せず同状態へ遷移して待機継続(IngestEvent に error 記録)。stable_probe_json の observed_at 欠落を KeyError にしない
+- `cli.py`:run の Drive クライアント初期化失敗を1行案内+exit 1。1サイクルの失敗で常駐を終了せず次 interval で再試行(--once は exit 1)。例外文言中のフォルダIDを `_redact` でマスク。setup は正確座標に見える入力(小数3桁以上・度記号・方位付き数値)をDB接続前に拒否(D-12)
+- `media_registry.py`:呼び出し側指定の recording_started_at をコピー前に parse_timestamp で検証・UTC正規化(表記なし・解釈不能は ValueError、+09:00 は Z へ正規化)。自動推定経路(T-112)は無変更
+- テスト8件:任意例外のジョブ隔離/完了待ち失敗が再試行を消費しない+回復後完了/observed_at 欠落許容/初期化失敗の案内/常駐のサイクル失敗継続+フォルダIDマスク/--once の exit 1/座標様入力の拒否と整数メッシュ許可/呼び出し側時刻の早期検証と正規化
 
 ## T-112実装の要点(レビュー観点)
 
@@ -66,7 +74,7 @@
 
 ## 未完了のこと
 
-- T-111 PRのCodexレビュー・マージ
+- T-112 PR #13・T-113 PR のCodexレビュー・マージ(T-113はT-112の上に積んでいるため、T-112マージ後にT-113のbaseをmainへ切り替えてマージ)
 - T-110実機E2Eスモークテスト(Windows解析PC。docs/WINDOWS_E2E.md の手順・チェックリスト)
 - T-102以降(音声抽出、BirdNET/SED、クリップ生成、UI、CSV出力)
 - リモート環境からのマージ済みブランチ削除(ref削除権限403。GitHub上で手動削除)
@@ -81,8 +89,8 @@
 ## 次に行うべきこと
 
 1. 利用者:Windows解析PCでの短尺2本の実機E2E(docs/WINDOWS_E2E.md のチェックリスト8項目+観察項目)
-2. Codex:T-112 PRのレビュー(優先順位・確実性ポリシー維持・TZ解釈・スキーマ無変更の確認)
-3. 調査責任者:E2E成功後にT-112 PRをマージ → Claude CodeがT-102 音声抽出へ着手(基準時刻を先に確定してから解析へ進む)
+2. Codex:T-112 PR #13 のレビュー(優先順位・確実性ポリシー維持・TZ解釈・スキーマ無変更の確認)、T-113 PR のレビュー(例外隔離・再試行ポリシー・入力検証・スキーマ無変更の確認)
+3. 調査責任者:E2E成功後にT-112 PR #13 → T-113 PR の順でマージ → Claude CodeがT-102 音声抽出へ着手(基準時刻を先に確定してから解析へ進む)
 
 ## T-101実装の要点(レビュー観点)
 
@@ -111,7 +119,7 @@
 
 ## 実行したテスト/テスト結果
 
-- `pytest`:92件すべてパス(環境確認7件+DB27件+メディア登録27件+Drive取込16件+CLI15件)
+- `pytest`:100件すべてパス(環境確認7件+DB27件+メディア登録28件+Drive取込19件+CLI19件)。合成メディア・一時DB・Fake Driveのみ(本番DB・実Driveへは書き込まない)
 - DBテスト内訳:空DBへの最新スキーマ構築/1バージョンずつの段階的マイグレーション/再実行の冪等性/外部キー有効化・integrity_check/正確座標列の不存在検査/不透明IDポリシー/UTCヘルパー/FK違反拒否/一意制約/enum CHECK拒否/SED由来・種候補なしAudioDetection保存/統合後の生スコア保持/ReferenceObservation精査情報+二重確認CHECK/review追記専用/analysis_run完了後凍結/run_event・access_log追記専用/DetectionLink確定に人の記録必須
 - `bio-observer-envcheck`:すべてOK(Python 3.11.15 / ffmpeg 6.1.1 / ffprobe 6.1.1 / 設定読み込み)
 - ライブラリ比較:birdnet 0.2.16・birdnet-analyzer 2.4.0のインストール・API検証(詳細はD-22)。推論は未実施(T-103申し送り)
@@ -124,7 +132,8 @@
 ## 関連コミット
 
 - 設計:PR #1/T-003:PR #3/T-004:PR #5/T-101:PR #8/T-110:PR #9(main: a993260)
-- T-111:本ブランチ claude/t111-ingest-cli(Issue #10)
+- T-111:PR #11(main: 89b8050)
+- T-112:PR #13(ブランチ claude/t112-recording-time-basis、Issue #12)/T-113:ブランチ claude/t113-ingest-robustness(Issue #14、base=T-112ブランチ)
 
 ## 変更してはいけない事項
 

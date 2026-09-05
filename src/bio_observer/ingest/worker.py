@@ -32,7 +32,6 @@ from bio_observer.ingest.drive import DriveClient, DriveFileInfo, DriveIngestCon
 from bio_observer.media_registry import (
     SUPPORTED_EXTENSIONS,
     DuplicateMediaError,
-    MediaRegistrationError,
     register_media,
 )
 
@@ -147,11 +146,12 @@ def _check_upload_stable(conn: sqlite3.Connection, client: DriveClient,
     now = utc_now_iso()
     same = (probe.get("size") == info.size_bytes
             and probe.get("modified") == info.modified_time)
-    if not same:
+    observed_prev = probe.get("observed_at")
+    if not same or not observed_prev:
         confirmations = 1
-        observed_at = now  # 変化を観測:基準時刻を更新して数え直し
+        observed_at = now  # 変化を観測(または基準時刻なし):基準時刻を更新して数え直し
     else:
-        elapsed = (_parse_iso(now) - _parse_iso(probe["observed_at"])).total_seconds()
+        elapsed = (_parse_iso(now) - _parse_iso(observed_prev)).total_seconds()
         if elapsed >= cfg.stability_interval_seconds:
             confirmations = probe.get("confirmations", 1) + 1
             observed_at = now
@@ -361,10 +361,20 @@ def process_pending(conn: sqlite3.Connection, client: DriveClient,
                 _upload_results(conn, client, cfg, storage, job)
                 _transition(conn, job_id, "completed", message="結果返却完了")
                 summary.completed += 1
-        except (OSError, MediaRegistrationError, sqlite3.DatabaseError) as exc:
+        except Exception as exc:  # noqa: BLE001 — ジョブ単位で隔離(KeyboardInterruptは通す)
+            # Drive API(HttpError等)・I/O・DB・登録エラーのいずれも、他ジョブと
+            # 継続実行を止めずにこのジョブの再試行/失敗として記録する(T-113)
             job = _reload(conn, job_id)
+            error = f"{type(exc).__name__}: {exc}"
+            if job["status"] == "waiting_for_upload":
+                # 完了待ち段階の失敗(一時的な通信エラー等)は再試行回数を消費せず待機継続。
+                # 上限による failed 判定はダウンロード以降の失敗に限定する(T-113)
+                _transition(conn, job_id, "waiting_for_upload",
+                            message=f"完了確認でエラー(待機継続): {error}", error=error)
+                summary.waiting += 1
+                continue
             resume = job["status"] if job["status"] in RETRYABLE_STATUSES else "waiting_for_upload"
-            outcome = _fail_or_retry(conn, job, cfg, resume, f"{type(exc).__name__}: {exc}")
+            outcome = _fail_or_retry(conn, job, cfg, resume, error)
             if outcome == "failed":
                 summary.failed += 1
             else:
