@@ -10,6 +10,13 @@
 - register_media:呼び出し側指定の recording_started_at をコピー前に検証・UTC正規化(表記なし・解釈不能は ValueError。+09:00 等は正規化して保存)
 - テスト8件追加(全100件パス)。DB・既存データ・設計方針(D-26〜D-28)は無変更。D-29
 
+### 2026-09-06 Codexレビュー対応(同PR)
+
+- ワーカー:例外文言のフォルダIDを **DB(ingest_job.error)・IngestEvent へ保存する前に** 伏せる(`worker.redact_secrets`。CLI表示と同じ規則)。status は保存済みの値にも表示前に伏せ字を適用
+- ワーカー:完了待ち段階で再試行回数を消費しないのは通信断・一時障害(OSError系・HTTP 5xx/429・通信ライブラリ由来)に限定。内部データ異常(ValueError等)・HTTP 4xx は通常の再試行→上限で failed(永久待機にしない)
+- ワーカー:壊れた stable_probe_json(不正JSON・形式・observed_at・confirmations)は例外にせず観測情報を初期化して再確認(理由を IngestEvent に記録)
+- 回帰テスト5件追加(パラメータ化5ケースを含め9ケース。全110件パス)。D-29追記
+
 ## 2026-09-06(T-112再レビュー対応:動画内タグの順次評価。Issue #12)
 
 - probe_media が作成日時タグを format tags → 各 stream tags の探索順で**すべて**取得(`MediaMetadata.creation_time_tags`)。候補評価は各タグを候補①として順に評価し、先頭が不正でも後続の有効タグを採用(以前は1件目で打ち切り、Drive modifiedTime へ落ちていた)。候補記録に `order` を追加(priority は優先順位の段のまま)

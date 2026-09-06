@@ -47,17 +47,28 @@ def _configure_windows_console() -> None:
 
 
 def _mask(value: str) -> str:
-    """識別子のマスク表示(先頭4文字のみ。アクセス権を与えうる値を全表示しない)。"""
-    return f"{value[:4]}…(設定済み)" if len(value) > 4 else "(設定済み)"
+    """識別子のマスク表示(先頭4文字のみ。アクセス権を与えうる値を全表示しない)。
+
+    保存経路(worker)と同じ規則を使い、表示と保存で伏せ方がずれないようにする。
+    """
+    return worker.mask_secret(value)
 
 
 def _redact(exc: BaseException, cfg: DriveIngestConfig) -> str:
-    """例外文言からDriveフォルダIDを伏せる(HttpErrorはリクエストURLを含むため)。"""
-    text = f"{type(exc).__name__}: {exc}"
-    for secret in {cfg.inbox_folder_id, cfg.results_parent_folder_id}:
-        if secret:
-            text = text.replace(secret, _mask(secret))
-    return text
+    """例外文言からDriveフォルダIDを伏せる(HttpErrorはリクエストURLを含むため)。
+
+    ワーカーがDB・イベントへ保存する際と同じ規則(worker.redact_secrets)を使う。
+    """
+    return worker.redact_secrets(f"{type(exc).__name__}: {exc}", worker.config_secrets(cfg))
+
+
+_SECRET_ENV_NAMES = ("BIO_OBSERVER_DRIVE_INBOX_FOLDER_ID",
+                     "BIO_OBSERVER_DRIVE_RESULTS_PARENT_FOLDER_ID")
+
+
+def _env_secrets() -> tuple[str, ...]:
+    """表示前に伏せる設定値(status は DriveIngestConfig を必須としないため環境変数から)。"""
+    return tuple(v for v in (os.environ.get(n) for n in _SECRET_ENV_NAMES) if v)
 
 
 # 正確な座標に見える入力を拒否する(SECURITY.md / D-12。メッシュコード等の整数表記は許可)
@@ -344,11 +355,13 @@ def cmd_status(args) -> int:
         if not rows:
             print("IngestJobはまだありません(bio-observer run で取込を開始してください)")
             return 0
+        secrets = _env_secrets()
         for row in rows:
             media = row["media_asset_id"] or (
                 f"duplicate→{row['duplicate_of_media_asset_id']}"
                 if row["duplicate_of_media_asset_id"] else "-")
-            error = (row["error"] or "").replace("\n", " ")
+            # 保存済みの文言にも伏せ字を適用(旧版で保存された未マスクの値への防御)
+            error = worker.redact_secrets(row["error"] or "", secrets).replace("\n", " ")
             if len(error) > 80:
                 error = error[:80] + "…"
             print(f"{row['id']}  {row['status']:<18} retry={row['retry_count']} "

@@ -299,6 +299,27 @@ def test_setup_rejects_precise_coordinates(env, capsys):
                  "--survey-date", "2026-08-01", "--rounded-position", "5339-23"]) == 0
 
 
+def test_status_masks_folder_id_in_stored_error(env, capsys, monkeypatch):
+    """T-113再レビュー:旧版で未マスクのまま保存された error も status 表示時に伏せる。"""
+    import sqlite3
+    folder_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456"  # 架空
+    monkeypatch.setenv("BIO_OBSERVER_DRIVE_INBOX_FOLDER_ID", folder_id)
+    session = _setup_session(capsys)
+    conn = sqlite3.connect(_db_file(env))
+    conn.execute(
+        "INSERT INTO ingest_job (id, source, drive_file_id, original_file_name, "
+        "survey_session_id, status, retry_count, error, results_folder_name, "
+        "created_at, updated_at) VALUES (?, 'google_drive', 'gdrv0001', 'IMG_x.MOV', ?, "
+        "'retry_required', 1, ?, 'ijob_x', '2026-08-09T00:00:00Z', '2026-08-09T00:00:00Z')",
+        ("ijob_" + "0" * 32, session,
+         f"HttpError: <HttpError 500 when requesting .../files?q='{folder_id}'+in+parents>"))
+    conn.commit()
+    conn.close()
+    assert main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "HttpError" in out and folder_id not in out and "1AbC…" in out
+
+
 def test_interval_must_be_positive(env, capsys):
     for bad in ("0", "-5", "abc"):
         with pytest.raises(SystemExit) as exc:

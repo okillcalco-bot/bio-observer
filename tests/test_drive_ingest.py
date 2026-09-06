@@ -505,6 +505,128 @@ def test_stability_probe_without_observed_at_is_tolerated(db, seed, storage, cfg
     assert summary.completed == 1
 
 
+_REALISTIC_FOLDER_ID = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456"  # 架空(実IDではない)
+
+
+def _cfg_with_real_looking_ids() -> DriveIngestConfig:
+    return DriveIngestConfig(inbox_folder_id=_REALISTIC_FOLDER_ID,
+                             results_parent_folder_id=_REALISTIC_FOLDER_ID,
+                             max_retries=2, stability_confirmations=2,
+                             stability_interval_seconds=0)
+
+
+def _all_persisted_text(db) -> str:
+    """ingest_job.error と ingest_event の message/detail をまとめて返す(漏えい検査用)。"""
+    parts = [r[0] or "" for r in db.execute("SELECT error FROM ingest_job")]
+    parts += [f"{r[0] or ''} {r[1] or ''}" for r in
+              db.execute("SELECT message, detail_json FROM ingest_event")]
+    return "\n".join(parts)
+
+
+def test_persisted_errors_do_not_contain_folder_ids(db, seed, storage, sample_bytes):
+    """T-113再レビュー:例外文言に含まれるフォルダIDは DB(ingest_job.error)・
+    IngestEvent へ保存する前に伏せられる(CLI表示だけでなく保存経路も安全化)。"""
+    cfg2 = _cfg_with_real_looking_ids()
+    drive = FakeDrive()
+    fid = drive.add_inbox_file("IMG_leak.MOV", sample_bytes)
+    drive.files[fid]["parent"] = cfg2.inbox_folder_id
+    url = f"https://www.googleapis.com/drive/v3/files/{fid}?q='{cfg2.inbox_folder_id}'+in+parents"
+    # 完了待ち段階(通信エラー扱い)とダウンロード段階(再試行)の両方で保存文言を検査
+    drive.get_file_info = lambda _fid: (_ for _ in ()).throw(
+        ConnectionError(f"<HttpError 503 when requesting {url} returned 'Backend Error'>"))
+    run_cycle(db, drive, cfg2, storage, seed["session"])
+    run_cycle(db, drive, cfg2, storage, seed["session"])
+    drive.get_file_info = lambda _fid: drive._info(_fid)
+    drive.download_file = lambda _fid, _dest: (_ for _ in ()).throw(
+        OSError(f"<HttpError 500 when requesting {url}?alt=media>"))
+    run_cycle(db, drive, cfg2, storage, seed["session"])
+    run_cycle(db, drive, cfg2, storage, seed["session"])
+    persisted = _all_persisted_text(db)
+    assert "HttpError" in persisted                       # 内容は残る
+    assert cfg2.inbox_folder_id not in persisted          # フォルダIDは残らない
+    assert "1AbC…(設定済み)" in persisted                  # 先頭4文字のマスクに置換
+    job = db.execute("SELECT error, status FROM ingest_job").fetchone()
+    assert cfg2.inbox_folder_id not in job["error"] and job["status"] == "retry_required"
+
+
+def test_data_anomaly_in_waiting_consumes_retries(db, seed, storage, cfg, sample_bytes):
+    """T-113再レビュー:完了待ち段階でも内部データ異常(通信断ではない例外)は
+    再試行回数を消費し、上限で failed になる(永久待機にしない)。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_anomaly.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    drive.get_file_info = lambda _fid: (_ for _ in ()).throw(ValueError("unexpected payload"))
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    assert summary.retrying == 1 and summary.waiting == 0
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert job["status"] == "retry_required" and job["retry_count"] == 1
+    assert job["resume_status"] == "waiting_for_upload"
+    for _ in range(cfg.max_retries):
+        summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    assert summary.failed == 1
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert job["status"] == "failed" and job["retry_count"] == cfg.max_retries + 1
+    assert "ValueError" in job["error"]
+
+
+def test_http_status_decides_transient_in_waiting(db, seed, storage, cfg, sample_bytes):
+    """T-113再レビュー:HttpError 相当は HTTP ステータスで区別する。
+    5xx/429 は通信障害(待機継続・再試行消費なし)、404/403 は待っても直らないため再試行消費。"""
+    class FakeResp:
+        def __init__(self, status):
+            self.status = status
+
+    class FakeHttpError(Exception):  # googleapiclient.errors.HttpError と同じ属性形状
+        def __init__(self, status):
+            super().__init__(f"<HttpError {status}>")
+            self.resp = FakeResp(status)
+
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_http.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    drive.get_file_info = lambda _fid: (_ for _ in ()).throw(FakeHttpError(503))
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT status, retry_count FROM ingest_job").fetchone()
+    assert summary.waiting == 1 and tuple(job) == ("waiting_for_upload", 0)
+    drive.get_file_info = lambda _fid: (_ for _ in ()).throw(FakeHttpError(404))
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT status, retry_count FROM ingest_job").fetchone()
+    assert summary.retrying == 1 and tuple(job) == ("retry_required", 1)
+
+
+@pytest.mark.parametrize("probe_json, reason_part", [
+    ("{not json", "解釈できない"),
+    ('["a", "b"]', "想定形式でない"),
+    (json.dumps({"size": 1, "modified": "x", "confirmations": 1,
+                 "observed_at": "garbage"}), "observed_at / confirmations"),
+    (json.dumps({"size": 1, "modified": "x", "confirmations": "2",
+                 "observed_at": "2026-08-09T00:00:00Z"}), "observed_at / confirmations"),
+    (json.dumps({"size": 1, "modified": "x", "confirmations": 1,
+                 "observed_at": "2026-08-09T00:00:00"}), "observed_at / confirmations"),  # naive
+])
+def test_corrupted_probe_is_reinitialized_not_stuck(db, seed, storage, cfg, sample_bytes,
+                                                    probe_json, reason_part):
+    """T-113再レビュー:壊れた観測情報(JSON・観測日時・確認回数)は例外にも永久待機にもせず、
+    初期化して再確認する(IngestEvent に理由を記録)。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_probe.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    job_id = db.execute("SELECT id FROM ingest_job").fetchone()["id"]
+    db.execute("UPDATE ingest_job SET stable_probe_json = ? WHERE id = ?", (probe_json, job_id))
+    db.commit()
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job = _job(db, job_id)
+    assert summary.failed == 0 and summary.retrying == 0 and summary.waiting == 1
+    assert job["status"] == "waiting_for_upload" and job["retry_count"] == 0
+    probe = json.loads(job["stable_probe_json"])
+    assert probe["confirmations"] == 1 and probe["observed_at"].endswith("Z")
+    messages = [r[0] for r in db.execute(
+        "SELECT message FROM ingest_event WHERE ingest_job_id = ? ORDER BY rowid", (job_id,))]
+    assert any(m and "観測情報を初期化" in m and reason_part in m for m in messages)
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])  # 数え直して完了
+    assert summary.completed == 1
+
+
 def test_ingest_event_append_only(db, seed, cfg):
     drive = FakeDrive()
     drive.add_inbox_file("IMG_ev.MOV", b"x")

@@ -233,6 +233,12 @@ with birdnet.AcousticPredictionSession(model) as s:
 - **正確座標に見える入力の拒否**:setup の --project/--site/--station/--rounded-position に、小数3桁以上の度表記(35.123 等)・度記号(°)・方位付き数値(34.98N 等)が含まれる場合はDBへ触れる前に拒否する(D-12 の運用上の防御。メッシュコード等の整数表記は許可)。完全な座標検出ではなく、明らかな誤入力を防ぐ最小限のパターンとする。
 - **呼び出し側指定の撮影開始時刻の早期検証**:register_media へ渡された recording_started_at は parse_timestamp でコピー前に検証・UTC正規化する(表記なし=timezone_unknown・解釈不能=invalid は ValueError)。従来はコピー後の INSERT 時に CHECK 違反として遅く失敗しており、オフセット付き(+09:00)の正しい値も拒否されていた。T-112 の解釈条件(BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE)は自動推定と同じ規則で適用する。
 
+**追記(2026-09-06、T-113 Codexレビュー対応)**
+- **エラー保存経路の秘匿**:例外文言の伏せ字は CLI 表示だけでなく、ワーカーが ingest_job.error / ingest_event(message・detail)へ保存する前にも適用する(`worker.redact_secrets` を保存・表示の共通規則とし、CLI の `_mask` も同じ関数へ委譲)。status は保存済みの値にも表示前に伏せ字を適用する(旧版で未マスクのまま保存された行への防御)。伏せる対象は受け箱・結果フォルダIDで、ローカルパス・Drive File ID(ジョブ列として保持している値)は対象外。
+- **通信断とデータ異常の分離**:完了待ち(waiting_for_upload)で再試行回数を消費しないのは「通信断・一時的な障害」(`_is_transient_error`:OSError系、HTTP 5xx/429、httplib2・googleapiclient 等の通信ライブラリ由来)に限る。ValueError / KeyError 等の内部データ異常や HTTP 4xx(削除・権限不足=待っても直らない)は通常の再試行→上限で failed とし、永久待機にしない。
+- **修復可能な観測情報の初期化**:`stable_probe_json` の壊れたJSON・想定外の形式・不正な observed_at(非文字列・形式不正・naive)・不正な confirmations(非整数・1未満)は、例外にせず観測情報を初期化して再確認する(理由を IngestEvent に記録)。観測情報はワーカーが再確認で作り直せる派生情報であり、初期化しても既存レコード・状態機械に影響しない。
+- **運用判断(調査責任者)**:正常なアップロード待ち・一時通信断は長時間待機を許容する。poll_error_count 等のカラム新設は行わない(IngestEvent の記録で把握する)。座標様入力の拒否パターンは暫定ガードとして維持する。
+
 ---
 
 ## 旧・判断待ち事項の決定(P-1〜P-8 → D-14〜D-21)

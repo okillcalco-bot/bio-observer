@@ -38,6 +38,62 @@ from bio_observer.media_registry import (
 RETRYABLE_STATUSES = ("waiting_for_upload", "downloading", "downloaded",
                       "registered", "queued", "analyzing", "uploading_results")
 
+# 通信断・一時的なサービス障害と見なす例外の発生元(モジュールの先頭要素)
+_TRANSIENT_ERROR_MODULES = frozenset({"httplib2", "googleapiclient", "google", "requests",
+                                      "urllib3", "http", "ssl", "socket"})
+
+
+def mask_secret(value: str) -> str:
+    """フォルダID等の秘密情報を先頭4文字だけ残して伏せる(表示・保存の共通規則)。"""
+    return f"{value[:4]}…(設定済み)" if len(value) > 4 else "(設定済み)"
+
+
+def config_secrets(cfg: DriveIngestConfig | None) -> tuple[str, ...]:
+    """DB・イベント・表示へ出してはいけない設定値(Driveフォルダ ID。SECURITY.md)。"""
+    if cfg is None:
+        return ()
+    return tuple(v for v in {cfg.inbox_folder_id, cfg.results_parent_folder_id} if v)
+
+
+def redact_secrets(text: str | None, secrets) -> str | None:
+    """文言に含まれる秘密情報(フォルダID等)を伏せる。
+
+    Drive API の HttpError はリクエストURLにフォルダIDを含むため、例外文言を
+    ingest_job.error / ingest_event へ保存する前、および status で表示する前に
+    必ず通す(T-113。保存経路と表示経路の両方で同じ規則を使う)。
+    """
+    if not text:
+        return text
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, mask_secret(secret))
+    return text
+
+
+def _describe_error(exc: BaseException, cfg: DriveIngestConfig) -> str:
+    return redact_secrets(f"{type(exc).__name__}: {exc}", config_secrets(cfg))
+
+
+def _is_transient_error(exc: BaseException) -> bool:
+    """通信断・一時的なサービス障害か(データ異常・設定不備・権限不足と区別する)。
+
+    完了待ち(waiting_for_upload)段階では、この判定が True の失敗のみ再試行回数を
+    消費せず待機を継続する。False(ValueError / KeyError 等の内部データ異常、
+    HTTP 4xx=削除・権限不足など待っても直らないもの)は通常の再試行→上限で failed。
+    """
+    resp = getattr(exc, "resp", None)               # googleapiclient.errors.HttpError
+    status = getattr(resp, "status", None)
+    if status is not None:
+        try:
+            status = int(status)
+        except (TypeError, ValueError):
+            return False
+        return status == 429 or status >= 500
+    if isinstance(exc, OSError):                     # ConnectionError / TimeoutError / socket / ssl
+        return True
+    module = (type(exc).__module__ or "").split(".")[0]
+    return module in _TRANSIENT_ERROR_MODULES
+
 
 @dataclass
 class CycleSummary:
@@ -133,6 +189,35 @@ def _parse_iso(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _parse_probe_time(value) -> datetime | None:
+    """観測時刻を解釈する。不正(非文字列・形式不正・naive)は None(=初期化対象)。"""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = _parse_iso(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _load_probe(job: sqlite3.Row) -> tuple[dict, str | None]:
+    """stable_probe_json を読む。壊れたJSON・想定外の形式は空の観測情報+理由を返す。
+
+    観測情報(size / modified / confirmations / observed_at)はワーカーが再確認で
+    作り直せる修復可能な情報なので、異常時は例外にせず初期化して数え直す(T-113)。
+    """
+    raw = job["stable_probe_json"]
+    if not raw:
+        return {}, None
+    try:
+        probe = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}, "stable_probe_json を解釈できないため初期化"
+    if not isinstance(probe, dict):
+        return {}, "stable_probe_json が想定形式でないため初期化"
+    return probe, None
+
+
 def _check_upload_stable(conn: sqlite3.Connection, client: DriveClient,
                          cfg: DriveIngestConfig, job: sqlite3.Row) -> bool:
     """サイズ・modifiedTimeが「最小時間間隔を空けた」連続確認で不変ならTrue。
@@ -142,22 +227,32 @@ def _check_upload_stable(conn: sqlite3.Connection, client: DriveClient,
     ダウンロードへ進まない(4時間動画の途中取得防止)。
     """
     info = client.get_file_info(job["drive_file_id"])
-    probe = json.loads(job["stable_probe_json"] or "{}")
+    probe, repair = _load_probe(job)
     now = utc_now_iso()
     same = (probe.get("size") == info.size_bytes
             and probe.get("modified") == info.modified_time)
-    observed_prev = probe.get("observed_at")
-    if not same or not observed_prev:
+    prev_observed = _parse_probe_time(probe.get("observed_at"))
+    prev_confirmations = probe.get("confirmations")
+    if probe and (prev_observed is None or not isinstance(prev_confirmations, int)
+                  or isinstance(prev_confirmations, bool) or prev_confirmations < 1):
+        # 観測情報が壊れている(observed_at 不正・confirmations 非整数等):
+        # 例外にせず初期化して数え直す(内部データ異常で永久待機・失敗にしない)
+        repair = repair or "観測情報(observed_at / confirmations)が不正のため初期化"
+        same = False
+    if repair:
+        _transition(conn, job["id"], "waiting_for_upload",
+                    message=f"観測情報を初期化して再確認: {repair}")
+    if not same:
         confirmations = 1
-        observed_at = now  # 変化を観測(または基準時刻なし):基準時刻を更新して数え直し
+        observed_at = now  # 変化を観測(または基準なし):基準時刻を更新して数え直し
     else:
-        elapsed = (_parse_iso(now) - _parse_iso(observed_prev)).total_seconds()
+        elapsed = (_parse_iso(now) - prev_observed).total_seconds()
         if elapsed >= cfg.stability_interval_seconds:
-            confirmations = probe.get("confirmations", 1) + 1
+            confirmations = prev_confirmations + 1
             observed_at = now
         else:
             # 間隔不足:確認回数・基準時刻を進めない
-            confirmations = probe.get("confirmations", 1)
+            confirmations = prev_confirmations
             observed_at = probe["observed_at"]
     conn.execute(
         "UPDATE ingest_job SET stable_probe_json = ?, size_bytes = ?, modified_time = ?, "
@@ -363,14 +458,16 @@ def process_pending(conn: sqlite3.Connection, client: DriveClient,
                 summary.completed += 1
         except Exception as exc:  # noqa: BLE001 — ジョブ単位で隔離(KeyboardInterruptは通す)
             # Drive API(HttpError等)・I/O・DB・登録エラーのいずれも、他ジョブと
-            # 継続実行を止めずにこのジョブの再試行/失敗として記録する(T-113)
+            # 継続実行を止めずにこのジョブの再試行/失敗として記録する(T-113)。
+            # 保存する文言はフォルダID等を伏せる(HttpErrorはURLにフォルダIDを含む)
             job = _reload(conn, job_id)
-            error = f"{type(exc).__name__}: {exc}"
-            if job["status"] == "waiting_for_upload":
-                # 完了待ち段階の失敗(一時的な通信エラー等)は再試行回数を消費せず待機継続。
-                # 上限による failed 判定はダウンロード以降の失敗に限定する(T-113)
+            error = _describe_error(exc, cfg)
+            if job["status"] == "waiting_for_upload" and _is_transient_error(exc):
+                # 完了待ち段階の「通信断・一時的な障害」は再試行回数を消費せず待機継続
+                # (正常なアップロード待ちは数時間に及ぶ)。内部データ異常・4xx は
+                # 通常の再試行→上限で failed(同じ扱いにしない。T-113)
                 _transition(conn, job_id, "waiting_for_upload",
-                            message=f"完了確認でエラー(待機継続): {error}", error=error)
+                            message=f"完了確認で通信エラー(待機継続): {error}", error=error)
                 summary.waiting += 1
                 continue
             resume = job["status"] if job["status"] in RETRYABLE_STATUSES else "waiting_for_upload"
