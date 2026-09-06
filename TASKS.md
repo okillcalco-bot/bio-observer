@@ -31,7 +31,7 @@
 | T-110 | Google Drive自動取込・結果返却 | IngestJob/IngestEvent(0002)、完了判定(時間間隔つき連続確認)、チャンクDL+サイズ検証、二重解析防止、results/<job_id>/返却(冪等)、再開・再試行、解析hook差込点(D-27)。Codex承認済み・PR #9でmainへマージ | Claude Code | 完了(Issue #6) |
 | T-111 | 取込CLI | migrate/setup/check-config/run(--once/--interval/--dry-run)/status。単一ワーカー排他ロック、Ctrl+C安全停止、秘密情報マスク、OAuth前設定検査、Windows手順+E2Eチェックリスト(docs/WINDOWS_E2E.md)(D-28)。レビュー対応:dry-run/statusの完全読み取り専用化・ロック取得前倒し・interval入力制約。テスト14件。Codex承認済み・PR #11でmainへマージ | Claude Code | 完了(Issue #10) |
 | T-112 | 撮影開始時刻の根拠優先順位 | 共通タイムラインの基準時刻改善:①動画メタデータcreation_time→②Drive modifiedTime→③ローカルファイル時刻→④人による補正(自動はestimated、人のみconfirmed=D-26維持)。TZ表記なしはtimezone_unknownとして不採用(明示的解釈条件のみ採用・条件記録)。各候補のraw/normalized/timezone/解釈/採否/理由をIngestEvent・status.jsonへ構造化記録。inspect-timeコマンド。実測記録docs/VERIFICATION_T112.md。テスト10件。**マージはT-102着手前**。再レビュー対応:動画内タグの順次評価(先頭不正でも後続採用)、実測表の未実測欄を明示 | Claude Code | レビュー対応済み・Codex再レビュー待ち(Issue #12、PR #13) |
-| T-113 | 取込ワーカー・CLIの堅牢性修正 | 再現した不具合のみ修正(スキーマ・既存データ・設計方針は無変更):ジョブ単位の例外隔離(HttpError等)、完了待ち段階の失敗は再試行回数を消費しない、probe防御、常駐ループの継続とクライアント初期化失敗の案内、エラー表示のフォルダIDマスク、setupの正確座標様入力拒否、呼び出し側指定時刻の早期検証(D-29)。Codexレビュー対応:エラー保存経路の秘匿、通信断とデータ異常の分離、壊れた観測情報の初期化。テスト13件(17ケース)。PR #15(base=claude/t112-recording-time-basis、PR #13の上に積む) | Claude Code | レビュー対応済み・Codex再レビュー待ち(Issue #14) |
+| T-113 | 取込ワーカー・CLIの堅牢性修正 | 再現した不具合のみ修正(スキーマ・既存データ・設計方針は無変更):ジョブ単位の例外隔離(HttpError等)、完了待ち段階の失敗は再試行回数を消費しない、probe防御、常駐ループの継続とクライアント初期化失敗の案内、エラー表示のフォルダIDマスク、setupの正確座標様入力拒否、呼び出し側指定時刻の早期検証(D-29)。Codexレビュー対応:エラー保存経路の秘匿、通信断とデータ異常の分離、壊れた観測情報の初期化。再レビュー対応:例外分類を具体型・reason 化(errors.py)、レート制限の非消費・自動再開、認証エラーでの停止(exit 2)、処理中取得フォルダIDの秘匿、dry-run 伏せ字。テスト19件(23ケース)。PR #15(base=claude/t112-recording-time-basis、PR #13の上に積む) | Claude Code | レビュー対応済み・Codex再レビュー待ち(Issue #14) |
 
 ## フェーズ2:映像パイプライン(M2)
 

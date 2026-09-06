@@ -25,7 +25,7 @@ from bio_observer.db.ids import new_id, utc_now_iso
 from bio_observer.envcheck import check_command
 from bio_observer.ingest.drive import DriveIngestConfig
 from bio_observer.ingest import worker
-from bio_observer.ingest.worker import WorkerAlreadyRunningError
+from bio_observer.ingest.worker import WorkerAlreadyRunningError, WorkerFatalError
 
 # OAuth認可より前に検査できる必須設定(check-config / run 起動時)
 _REQUIRED_ENV = (
@@ -59,7 +59,7 @@ def _redact(exc: BaseException, cfg: DriveIngestConfig) -> str:
 
     ワーカーがDB・イベントへ保存する際と同じ規則(worker.redact_secrets)を使う。
     """
-    return worker.redact_secrets(f"{type(exc).__name__}: {exc}", worker.config_secrets(cfg))
+    return worker.redact_secrets(f"{type(exc).__name__}: {exc}", worker.all_secrets(cfg))
 
 
 _SECRET_ENV_NAMES = ("BIO_OBSERVER_DRIVE_INBOX_FOLDER_ID",
@@ -260,9 +260,14 @@ def _cmd_run_dry(args, storage: StorageConfig, cfg: DriveIngestConfig,
             print(f"[NG] SurveySessionがありません: {args.session}"
                   "(bio-observer setup で作成してください)")
             return 1
-        client = client_factory()
+        try:
+            client = client_factory()
+            plans = worker.plan_inbox(conn, client, cfg)
+        except Exception as exc:  # noqa: BLE001 — 例外文言(URL中のフォルダID)を伏せて案内
+            print(f"[NG] dry-run失敗: {_redact(exc, cfg)}")
+            return 1
         print("dry-run:受け箱の一覧のみ表示します(Drive・DBとも変更しません)")
-        for plan in worker.plan_inbox(conn, client, cfg):
+        for plan in plans:
             size = plan["size_bytes"] if plan["size_bytes"] is not None else "?"
             print(f"  {plan['name']}  size={size}  → {plan['action']}")
         return 0
@@ -311,6 +316,13 @@ def cmd_run(args, client_factory) -> int:
             while True:
                 try:
                     summary = worker.run_cycle(conn, client, cfg, storage, args.session)
+                except WorkerFatalError as exc:
+                    # 再認可・証明書・設定の問題は待っても直らない:常駐を止めて案内する
+                    # (状態はDBへ保存済み。対処後の run で未完了ジョブから再開される)
+                    print(f"{utc_now_iso()} [NG] {_redact(exc, cfg)}")
+                    print("     token/credentials の再認可、証明書・プロキシ設定を確認し、"
+                          "対処後に bio-observer run を再実行してください")
+                    return 2
                 except Exception as exc:  # noqa: BLE001 — 1サイクルの失敗で常駐を止めない
                     print(f"{utc_now_iso()} サイクル失敗: {_redact(exc, cfg)}")
                     if args.once:

@@ -17,6 +17,14 @@
 - ワーカー:壊れた stable_probe_json(不正JSON・形式・observed_at・confirmations)は例外にせず観測情報を初期化して再確認(理由を IngestEvent に記録)
 - 回帰テスト5件追加(パラメータ化5ケースを含め9ケース。全110件パス)。D-29追記
 
+### 2026-09-06 Codex再レビュー対応(同PR)
+
+- 例外分類を `ingest/errors.py` へ分離し、具体的な例外型・HTTPステータス・reason で判定(モジュール名の一括判定と「OSError=通信断」「4xx=永続」を廃止)。transient / rate_limited / auth / permanent の4分類
+- 403 rateLimitExceeded / userRateLimitExceeded / sharingRateLimitExceeded / dailyLimitExceeded と 429 はレート制限として、どの段階でも再試行回数を消費せず retry_required(同じ段階)で待機。制限解除後に自動再開(従来は上限で failed になり再開しなかった)。5xx・通信断も同じ扱い
+- 認証・設定エラー(google.auth RefreshError 等・証明書検証失敗・401)は待機せず、ジョブを変えずに記録して `WorkerFatalError` でサイクル停止。CLI run は exit 2 で再認可等を案内
+- 処理中に取得した結果フォルダID(results/・results/<job_id>/)も伏せ字対象に登録し、DB・イベント・表示の全経路で伏せる。dry-run の例外も伏せ字で案内(トレースバックなし)
+- 回帰テスト6件追加(全116件パス。google-auth / googleapiclient の実物例外で分類を検証。drive extra 未導入環境ではその部分を skip)。D-29追記
+
 ## 2026-09-06(T-112再レビュー対応:動画内タグの順次評価。Issue #12)
 
 - probe_media が作成日時タグを format tags → 各 stream tags の探索順で**すべて**取得(`MediaMetadata.creation_time_tags`)。候補評価は各タグを候補①として順に評価し、先頭が不正でも後続の有効タグを採用(以前は1件目で打ち切り、Drive modifiedTime へ落ちていた)。候補記録に `order` を追加(priority は優先順位の段のまま)

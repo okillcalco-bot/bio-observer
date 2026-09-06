@@ -320,6 +320,35 @@ def test_status_masks_folder_id_in_stored_error(env, capsys, monkeypatch):
     assert "HttpError" in out and folder_id not in out and "1AbC…" in out
 
 
+def test_dry_run_failure_is_redacted_without_traceback(env, capsys, monkeypatch):
+    """T-113再レビュー:dry-run でも未マスクの例外が外へ出ない(フォルダIDは伏せ字、exit 1)。"""
+    folder_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456"  # 架空
+    monkeypatch.setenv("BIO_OBSERVER_DRIVE_INBOX_FOLDER_ID", folder_id)
+    session = _setup_session(capsys)
+
+    class Broken(FakeDrive):
+        def list_files(self, folder_id):
+            raise RuntimeError(f"<HttpError 500 when requesting .../files?q='{folder_id}'+in+parents>")
+
+    code = main(["run", "--session", session, "--once", "--dry-run"],
+                client_factory=lambda: Broken())
+    out = capsys.readouterr().out
+    assert code == 1 and "dry-run失敗" in out
+    assert folder_id not in out and "1AbC…" in out
+
+
+def test_run_stops_with_exit_2_on_auth_error(env, capsys, monkeypatch):
+    """T-113再レビュー:認証・設定エラーは常駐を止めて案内する(無期限待機にしない)。"""
+    session = _setup_session(capsys)
+    monkeypatch.setattr(worker, "run_cycle",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            worker.WorkerFatalError("認証・設定エラー(人の対応が必要): RefreshError")))
+    monkeypatch.setattr("bio_observer.cli.time.sleep", lambda s: None)
+    code = main(["run", "--session", session, "--interval", "1"], client_factory=lambda: FakeDrive())
+    out = capsys.readouterr().out
+    assert code == 2 and "再認可" in out and "RefreshError" in out
+
+
 def test_interval_must_be_positive(env, capsys):
     for bad in ("0", "-5", "abc"):
         with pytest.raises(SystemExit) as exc:

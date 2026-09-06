@@ -239,6 +239,15 @@ with birdnet.AcousticPredictionSession(model) as s:
 - **修復可能な観測情報の初期化**:`stable_probe_json` の壊れたJSON・想定外の形式・不正な observed_at(非文字列・形式不正・naive)・不正な confirmations(非整数・1未満)は、例外にせず観測情報を初期化して再確認する(理由を IngestEvent に記録)。観測情報はワーカーが再確認で作り直せる派生情報であり、初期化しても既存レコード・状態機械に影響しない。
 - **運用判断(調査責任者)**:正常なアップロード待ち・一時通信断は長時間待機を許容する。poll_error_count 等のカラム新設は行わない(IngestEvent の記録で把握する)。座標様入力の拒否パターンは暫定ガードとして維持する。
 
+**追記(2026-09-06、T-113 Codex再レビュー対応)**
+- **例外分類は具体的な型・原因で行う**(`ingest/errors.py`。モジュール名の一括判定・「OSError は全部通信断」・「4xx は全部永続」は採用しない):
+  - transient(通信断):ConnectionError / TimeoutError / socket.gaierror・herror / ssl.SSLError(証明書検証失敗を除く)/ http.client.HTTPException / 通信系 errno(ECONNRESET・ETIMEDOUT・EHOSTUNREACH 等)/ google.auth TransportError / httplib2 ServerNotFoundError / HTTP 5xx。
+  - rate_limited:HTTP 429、または 403 で reason が rateLimitExceeded・userRateLimitExceeded・sharingRateLimitExceeded・dailyLimitExceeded(Google「Resolve errors」に基づく。reason は HttpError の error_details → content JSON → 文言中トークンの順で取得)。
+  - auth(人の対応が必要):google.auth RefreshError・DefaultCredentialsError・MalformedError・OAuthError、ssl.SSLCertVerificationError、HTTP 401 / reason authError。
+  - permanent:上記以外(ValueError 等の内部データ異常、FileNotFoundError・PermissionError・ENOSPC 等のローカルI/O、素の OSError、403 権限不足・storageQuotaExceeded、404、400)。
+- **分類ごとの扱い**:transient / rate_limited は**どの段階でも**再試行回数を消費せず、完了待ちなら待機継続、それ以外は retry_required(resume_status=同じ段階)として次サイクルで再開する(レート制限解除後・障害復旧後に自動再開)。permanent は従来どおり再試行→上限で failed。auth はジョブの状態・再試行回数を変えずに IngestEvent へ記録し、`WorkerFatalError` でサイクルを止める。CLI run は exit 2 で常駐を終了し、再認可・証明書・プロキシ設定の確認を案内する(対処後の run で未完了ジョブから再開。状態はDB保存済み)。
+- **処理中に取得したフォルダIDの秘匿**:設定値(受け箱・結果親フォルダ)に加え、`ensure_folder` が返した results/ と results/<job_id>/ のフォルダIDも伏せ字対象へ登録し(`remember_secret`。プロセス内保持)、例外文言を保存・表示する前に長いものから置換する。dry-run も例外を捕捉して伏せ字で案内する(トレースバックを出さない)。限界:旧版で保存済みの行に含まれる結果フォルダIDは、別プロセスの status では判別できないため伏せられない(該当行があれば手動で error を確認・消去する運用)。
+
 ---
 
 ## 旧・判断待ち事項の決定(P-1〜P-8 → D-14〜D-21)

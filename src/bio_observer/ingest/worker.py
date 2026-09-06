@@ -28,6 +28,7 @@ from pathlib import Path
 
 from bio_observer.config import StorageConfig
 from bio_observer.db.ids import new_id, utc_now_iso
+from bio_observer.ingest import errors as ingest_errors
 from bio_observer.ingest.drive import DriveClient, DriveFileInfo, DriveIngestConfig
 from bio_observer.media_registry import (
     SUPPORTED_EXTENSIONS,
@@ -38,9 +39,11 @@ from bio_observer.media_registry import (
 RETRYABLE_STATUSES = ("waiting_for_upload", "downloading", "downloaded",
                       "registered", "queued", "analyzing", "uploading_results")
 
-# 通信断・一時的なサービス障害と見なす例外の発生元(モジュールの先頭要素)
-_TRANSIENT_ERROR_MODULES = frozenset({"httplib2", "googleapiclient", "google", "requests",
-                                      "urllib3", "http", "ssl", "socket"})
+class WorkerFatalError(RuntimeError):
+    """認証・設定エラーなど人の対応が必要な失敗。サイクルを止めて呼び出し側へ案内する。
+
+    ジョブの再試行回数は消費しない(ジョブ側の問題ではない)。原因は errors.classify_error。
+    """
 
 
 def mask_secret(value: str) -> str:
@@ -48,11 +51,27 @@ def mask_secret(value: str) -> str:
     return f"{value[:4]}…(設定済み)" if len(value) > 4 else "(設定済み)"
 
 
+# 処理中に Drive から取得したフォルダID(results/ と results/<job_id>/)。設定値ではないが
+# アクセス経路になり得るため、例外文言へ現れたら設定値と同様に伏せる(プロセス内で保持)
+_LEARNED_SECRETS: set[str] = set()
+
+
+def remember_secret(value: str | None) -> None:
+    """実行中に判明したフォルダID等を伏せ字対象へ登録する。"""
+    if value and len(value) > 4:
+        _LEARNED_SECRETS.add(value)
+
+
 def config_secrets(cfg: DriveIngestConfig | None) -> tuple[str, ...]:
     """DB・イベント・表示へ出してはいけない設定値(Driveフォルダ ID。SECURITY.md)。"""
     if cfg is None:
         return ()
     return tuple(v for v in {cfg.inbox_folder_id, cfg.results_parent_folder_id} if v)
+
+
+def all_secrets(cfg: DriveIngestConfig | None) -> tuple[str, ...]:
+    """設定値+処理中に取得したフォルダID(長いものから置換して部分一致の取りこぼしを防ぐ)。"""
+    return tuple(sorted(set(config_secrets(cfg)) | _LEARNED_SECRETS, key=len, reverse=True))
 
 
 def redact_secrets(text: str | None, secrets) -> str | None:
@@ -71,28 +90,7 @@ def redact_secrets(text: str | None, secrets) -> str | None:
 
 
 def _describe_error(exc: BaseException, cfg: DriveIngestConfig) -> str:
-    return redact_secrets(f"{type(exc).__name__}: {exc}", config_secrets(cfg))
-
-
-def _is_transient_error(exc: BaseException) -> bool:
-    """通信断・一時的なサービス障害か(データ異常・設定不備・権限不足と区別する)。
-
-    完了待ち(waiting_for_upload)段階では、この判定が True の失敗のみ再試行回数を
-    消費せず待機を継続する。False(ValueError / KeyError 等の内部データ異常、
-    HTTP 4xx=削除・権限不足など待っても直らないもの)は通常の再試行→上限で failed。
-    """
-    resp = getattr(exc, "resp", None)               # googleapiclient.errors.HttpError
-    status = getattr(resp, "status", None)
-    if status is not None:
-        try:
-            status = int(status)
-        except (TypeError, ValueError):
-            return False
-        return status == 429 or status >= 500
-    if isinstance(exc, OSError):                     # ConnectionError / TimeoutError / socket / ssl
-        return True
-    module = (type(exc).__module__ or "").split(".")[0]
-    return module in _TRANSIENT_ERROR_MODULES
+    return redact_secrets(f"{type(exc).__name__}: {exc}", all_secrets(cfg))
 
 
 @dataclass
@@ -330,7 +328,9 @@ def _upload_results(conn: sqlite3.Connection, client: DriveClient,
                     job: sqlite3.Row) -> None:
     """results/<job_id>/ へ status.json と summary.csv を返却する。"""
     results_root = client.ensure_folder(cfg.results_parent_folder_id, "results")
+    remember_secret(results_root)   # 以降の例外文言(URL)に現れても伏せる
     job_folder = client.ensure_folder(results_root, job["results_folder_name"])
+    remember_secret(job_folder)
 
     media = None
     media_id = job["media_asset_id"] or job["duplicate_of_media_asset_id"]
@@ -462,15 +462,30 @@ def process_pending(conn: sqlite3.Connection, client: DriveClient,
             # 保存する文言はフォルダID等を伏せる(HttpErrorはURLにフォルダIDを含む)
             job = _reload(conn, job_id)
             error = _describe_error(exc, cfg)
-            if job["status"] == "waiting_for_upload" and _is_transient_error(exc):
-                # 完了待ち段階の「通信断・一時的な障害」は再試行回数を消費せず待機継続
-                # (正常なアップロード待ちは数時間に及ぶ)。内部データ異常・4xx は
-                # 通常の再試行→上限で failed(同じ扱いにしない。T-113)
-                _transition(conn, job_id, "waiting_for_upload",
-                            message=f"完了確認で通信エラー(待機継続): {error}", error=error)
-                summary.waiting += 1
-                continue
+            category = ingest_errors.classify_error(exc)
+            label = ingest_errors.CATEGORY_LABELS[category]
             resume = job["status"] if job["status"] in RETRYABLE_STATUSES else "waiting_for_upload"
+            if category == ingest_errors.AUTH:
+                # 再認可・設定修正など人の対応が必要:ジョブの再試行回数は消費せず、
+                # 状態も変えずに記録だけ残し、サイクルを止めて呼び出し側へ案内する
+                _transition(conn, job_id, job["status"],
+                            message=f"{label}のためワーカー停止: {error}", error=error)
+                raise WorkerFatalError(
+                    f"{label}: {error}(ジョブ {job_id} は再試行回数を消費せず保持)") from exc
+            if category in ingest_errors.WAITABLE:
+                # 通信断・一時障害・レート制限は待てば直る:再試行回数を消費せず、
+                # 次サイクルで同じ段階から再開する(制限解除後に自動再開。T-113)。
+                # 内部データ異常・権限不足・削除済み等は下の通常再試行→上限で failed
+                if job["status"] == "waiting_for_upload":
+                    _transition(conn, job_id, "waiting_for_upload",
+                                message=f"完了確認で{label}(待機継続): {error}", error=error)
+                    summary.waiting += 1
+                else:
+                    _transition(conn, job_id, "retry_required",
+                                message=f"{label}(再試行回数を消費せず次サイクルで再開): {error}",
+                                error=error, resume_status=resume)
+                    summary.retrying += 1
+                continue
             outcome = _fail_or_retry(conn, job, cfg, resume, error)
             if outcome == "failed":
                 summary.failed += 1

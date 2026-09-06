@@ -475,7 +475,8 @@ def test_polling_error_does_not_consume_retries(db, seed, storage, cfg, sample_b
     drive.add_inbox_file("IMG_poll.MOV", sample_bytes)
     run_cycle(db, drive, cfg, storage, seed["session"])
     original_info = drive.get_file_info
-    drive.get_file_info = lambda fid: (_ for _ in ()).throw(OSError("network down"))
+    # 通信断は具体的な型で判定される(素の OSError は通信断とは見なさない)
+    drive.get_file_info = lambda fid: (_ for _ in ()).throw(ConnectionResetError("network down"))
     for _ in range(cfg.max_retries + 2):  # 上限を超える回数の失敗
         summary = run_cycle(db, drive, cfg, storage, seed["session"])
         assert summary.waiting == 1 and summary.failed == 0 and summary.retrying == 0
@@ -624,6 +625,164 @@ def test_corrupted_probe_is_reinitialized_not_stuck(db, seed, storage, cfg, samp
         "SELECT message FROM ingest_event WHERE ingest_job_id = ? ORDER BY rowid", (job_id,))]
     assert any(m and "観測情報を初期化" in m and reason_part in m for m in messages)
     summary = run_cycle(db, drive, cfg, storage, seed["session"])  # 数え直して完了
+    assert summary.completed == 1
+
+
+def _make_http_error(status: int, reason: str | None = None, uri: str = "https://www.googleapis.com/drive/v3/files"):
+    """googleapiclient.errors.HttpError の実物を組み立てる(drive extra が必要)。"""
+    errors_mod = pytest.importorskip("googleapiclient.errors")
+    httplib2 = pytest.importorskip("httplib2")
+    resp = httplib2.Response({"status": status, "reason": "x"})
+    body = {"error": {"code": status, "message": reason or "error"}}
+    if reason:
+        body["error"]["errors"] = [{"domain": "usageLimits", "reason": reason, "message": reason}]
+    return errors_mod.HttpError(resp, json.dumps(body).encode(), uri=uri)
+
+
+def test_classify_error_by_concrete_type_and_reason():
+    """T-113再レビュー:分類はモジュール名の一括判定ではなく、具体的な例外型・HTTPステータス・reason で行う。"""
+    import errno
+    import http.client
+    import socket
+    import ssl
+    from bio_observer.ingest.errors import AUTH, PERMANENT, RATE_LIMITED, TRANSIENT, classify_error
+
+    # 通信断(具体的な型 / errno)
+    for exc in (ConnectionResetError("reset"), TimeoutError("t"), socket.gaierror(8, "dns"),
+                ssl.SSLEOFError("eof"), http.client.RemoteDisconnected("closed"),
+                OSError(errno.EHOSTUNREACH, "unreachable")):
+        assert classify_error(exc) == TRANSIENT, exc
+    # 認証・設定(人の対応が必要):証明書検証失敗は SSLError(=OSError)でも待たない
+    assert classify_error(ssl.SSLCertVerificationError(1, "certificate verify failed")) == AUTH
+    # 内部データ異常・ローカルI/O・素の OSError は permanent(通常の再試行→failed)
+    for exc in (ValueError("bad"), KeyError("k"), json.JSONDecodeError("m", "d", 0),
+                FileNotFoundError("missing"), PermissionError("denied"),
+                OSError(errno.ENOSPC, "no space"), OSError("plain")):
+        assert classify_error(exc) == PERMANENT, exc
+    # google-auth / httplib2(drive extra があれば実物で確認)
+    gauth = pytest.importorskip("google.auth.exceptions")
+    httplib2 = pytest.importorskip("httplib2")
+    assert classify_error(gauth.RefreshError("invalid_grant: Token has been expired or revoked")) == AUTH
+    assert classify_error(gauth.DefaultCredentialsError("no creds")) == AUTH
+    assert classify_error(gauth.TransportError("connection aborted")) == TRANSIENT
+    assert classify_error(httplib2.ServerNotFoundError("Unable to find the server")) == TRANSIENT
+    # HttpError:ステータス+reason
+    assert classify_error(_make_http_error(403, "userRateLimitExceeded")) == RATE_LIMITED
+    assert classify_error(_make_http_error(403, "rateLimitExceeded")) == RATE_LIMITED
+    assert classify_error(_make_http_error(429, "rateLimitExceeded")) == RATE_LIMITED
+    assert classify_error(_make_http_error(403, "insufficientFilePermissions")) == PERMANENT
+    assert classify_error(_make_http_error(403, "storageQuotaExceeded")) == PERMANENT
+    assert classify_error(_make_http_error(404, "notFound")) == PERMANENT
+    assert classify_error(_make_http_error(401, "authError")) == AUTH
+    assert classify_error(_make_http_error(503, "backendError")) == TRANSIENT
+    assert classify_error(_make_http_error(500)) == TRANSIENT
+
+
+def test_rate_limit_403_does_not_consume_retries_and_resumes(db, seed, storage, cfg, sample_bytes):
+    """T-113再レビュー:403 rateLimitExceeded / userRateLimitExceeded は再試行回数を消費せず、
+    制限解除後に同じ段階から再開して完了する(権限不足の403は通常どおり再試行消費)。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_rate.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])  # 発見・安定確認1回目
+    # 2サイクル目以降、ダウンロード段階でレート制限が続く(上限回数を超えても failed にならない)
+    original_download = drive.download_file
+    drive.download_file = lambda fid, dest: (_ for _ in ()).throw(
+        _make_http_error(403, "userRateLimitExceeded"))
+    for _ in range(cfg.max_retries + 3):
+        summary = run_cycle(db, drive, cfg, storage, seed["session"])
+        assert summary.failed == 0
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert job["status"] == "retry_required" and job["retry_count"] == 0
+    assert job["resume_status"] == "downloading"
+    assert "userRateLimitExceeded" in job["error"]
+    messages = [r[0] for r in db.execute("SELECT message FROM ingest_event ORDER BY rowid")]
+    assert any(m and "レート制限" in m and "消費せず" in m for m in messages)
+    # 制限解除 → 同じ段階から再開して完了
+    drive.download_file = original_download
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    assert summary.completed == 1
+    # 権限不足の 403 は待っても直らない:通常の再試行消費(同じフェイク上で別ファイル)
+    perm_fid = drive.add_inbox_file("IMG_perm.MOV", sample_bytes + b"\x01")
+    run_cycle(db, drive, cfg, storage, seed["session"])  # 発見
+    original_info = drive.get_file_info
+    drive.get_file_info = lambda fid: (_ for _ in ()).throw(
+        _make_http_error(403, "insufficientFilePermissions")) if fid == perm_fid else original_info(fid)
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    perm = db.execute("SELECT status, retry_count FROM ingest_job "
+                      "WHERE original_file_name = 'IMG_perm.MOV'").fetchone()
+    assert summary.retrying == 1 and tuple(perm) == ("retry_required", 1)
+
+
+def test_auth_error_stops_cycle_without_consuming_retries(db, seed, storage, cfg, sample_bytes):
+    """T-113再レビュー:再認可が必要な認証失敗・証明書検証失敗は「通信断」として無期限待機せず、
+    ジョブを変えずに WorkerFatalError でサイクルを止める(人の対応を促す)。"""
+    import ssl
+    gauth = pytest.importorskip("google.auth.exceptions")
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_auth.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    for exc in (gauth.RefreshError("invalid_grant: Token has been expired or revoked"),
+                ssl.SSLCertVerificationError(1, "certificate verify failed"),
+                _make_http_error(401, "authError")):
+        drive.get_file_info = lambda fid, exc=exc: (_ for _ in ()).throw(exc)
+        with pytest.raises(worker.WorkerFatalError) as info:
+            run_cycle(db, drive, cfg, storage, seed["session"])
+        assert "認証・設定エラー" in str(info.value)
+        job = db.execute("SELECT status, retry_count, error FROM ingest_job").fetchone()
+        assert job["status"] == "waiting_for_upload" and job["retry_count"] == 0
+        assert job["error"]  # 原因は記録される
+    messages = [r[0] for r in db.execute("SELECT message FROM ingest_event ORDER BY rowid")]
+    assert sum(1 for m in messages if m and "ワーカー停止" in m) == 3
+    # 対処後(再認可)は通常どおり再開して完了する
+    drive.get_file_info = lambda fid: drive._info(fid)
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    assert summary.completed == 1
+
+
+class _RealisticFolderDrive(FakeDrive):
+    """ensure_folder が実IDに似た長いフォルダIDを返し、返却時に URL 付きのエラーを出すフェイク。"""
+
+    def __init__(self):
+        super().__init__()
+        self.fail_upload = True
+
+    def ensure_folder(self, parent_id, name):
+        fid = super().ensure_folder(parent_id, name)
+        realistic = f"1Res{name}FolderIdXyZ0123456789abcdefgh"[:33]
+        if fid != realistic:
+            self.folders[realistic] = self.folders.pop(fid)
+        return realistic
+
+    def upload_file(self, folder_id, source, name):
+        if self.fail_upload:
+            raise _make_http_error(
+                500, "backendError",
+                uri=f"https://www.googleapis.com/upload/drive/v3/files?parents={folder_id}")
+        return super().upload_file(folder_id, source, name)
+
+
+def test_result_folder_ids_learned_at_runtime_are_masked(db, seed, storage, sample_bytes):
+    """T-113再レビュー:設定値だけでなく、処理中に取得した結果フォルダID(results/・results/<job_id>/)
+    も DB・イベントへ保存する前に伏せられる。"""
+    cfg2 = _cfg_with_real_looking_ids()
+    drive = _RealisticFolderDrive()
+    fid = drive.add_inbox_file("IMG_res.MOV", sample_bytes)
+    drive.files[fid]["parent"] = cfg2.inbox_folder_id
+    for _ in range(3):
+        run_cycle(db, drive, cfg2, storage, seed["session"])
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert job["status"] == "retry_required" and job["resume_status"] == "uploading_results"
+    assert job["retry_count"] == 0  # 5xx は待機扱い(消費なし)
+    learned = [f for f in drive.folders if f.startswith("1Res")]
+    assert len(learned) == 2
+    persisted = _all_persisted_text(db)
+    assert "HttpError 500" in persisted
+    for folder_id in learned + [cfg2.inbox_folder_id]:
+        assert folder_id not in persisted, folder_id
+    assert "1Res" in persisted and "…(設定済み)" in persisted
+    # 障害解消後に返却が完了する
+    drive.fail_upload = False
+    summary = run_cycle(db, drive, cfg2, storage, seed["session"])
     assert summary.completed == 1
 
 
