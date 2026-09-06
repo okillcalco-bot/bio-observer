@@ -377,6 +377,197 @@ def test_link_failure_with_other_errno_does_not_fall_back(
     assert _leftover_files(storage) == []
 
 
+@pytest.fixture(scope="module")
+def sample_video_with_creation_time(tmp_path_factory):
+    """動画内メタデータ creation_time を持つ合成動画(UTC表記)。"""
+    path = tmp_path_factory.mktemp("media") / "with_creation_time.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc=duration=1:size=160x120:rate=10",
+         "-c:v", "libx264", "-metadata", "creation_time=2026-07-29T08:01:00Z",
+         str(path)],
+        check=True, capture_output=True, timeout=120,
+    )
+    return path
+
+
+def test_parse_timestamp_explicit_timezone_variants():
+    from bio_observer.media_registry import TZ_EXPLICIT, TZ_INVALID, TZ_MISSING, parse_timestamp
+    for raw in ("2026-07-29T08:01:00.000000Z", "2026-07-29T17:01:00+0900",
+                "2026-07-29T17:01:00+09:00", "2026-07-29 03:01:00-05:00"):
+        parsed = parse_timestamp(raw)
+        assert parsed.normalized_value == "2026-07-29T08:01:00Z", raw
+        assert parsed.timezone == TZ_EXPLICIT and parsed.raw_value == raw
+    assert parse_timestamp("not-a-date").timezone == TZ_INVALID
+    assert parse_timestamp(None).timezone == TZ_MISSING
+
+
+def test_naive_timestamp_is_rejected_without_interpretation_basis():
+    """タイムゾーン表記なしはUTCとして自動採用しない(timezone_unknown→不採用)。"""
+    from bio_observer.media_registry import TZ_UNKNOWN, parse_timestamp
+    parsed = parse_timestamp("2026-07-29 17:01:00")
+    assert parsed.normalized_value is None
+    assert parsed.timezone == TZ_UNKNOWN
+    assert "解釈根拠がない" in parsed.interpretation
+
+
+def test_naive_timestamp_adopted_only_with_explicit_assumption():
+    """機器・調査設定に基づく解釈条件が与えられた場合のみ採用し、条件を記録する。"""
+    from bio_observer.media_registry import TZ_ASSUMED, TZ_INVALID, parse_timestamp
+    for assumption in ("+09:00", "Asia/Tokyo"):
+        parsed = parse_timestamp("2026-07-29 17:01:00", naive_timezone=assumption,
+                                 naive_timezone_origin="BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE")
+        assert parsed.normalized_value == "2026-07-29T08:01:00Z"
+        assert parsed.timezone == TZ_ASSUMED
+        assert assumption in parsed.interpretation
+        assert "BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE" in parsed.interpretation
+    # 解釈条件そのものが不正なら採用しない
+    assert parse_timestamp("2026-07-29 17:01:00",
+                           naive_timezone="Mars/Olympus").timezone == TZ_INVALID
+
+
+def test_candidate_records_are_reproducible(sample_video):
+    """各候補について source/raw/normalized/timezone/解釈条件/採否/不採用理由を保持する。"""
+    from bio_observer.media_registry import MediaMetadata, evaluate_recording_start_candidates
+    meta = MediaMetadata(media_type="video", codec="h264", width=1, height=1, fps=1,
+                         sample_rate=None, channels=None, duration_seconds=1.0,
+                         creation_time_raw="2026-07-29 17:01:00",  # 表記なし
+                         creation_time_tag="format.tags.creation_time")
+    epoch = 1785000000.0
+    # 解釈条件なし:①はtimezone_unknownで不採用 → ②を採用
+    candidates = evaluate_recording_start_candidates(
+        meta, "2026-08-09T11:35:51Z", epoch)
+    assert [c["source"] for c in candidates] == [
+        "media_metadata_creation_time", "origin_modified_time", "local_file_mtime"]
+    first, second, third = candidates
+    assert first["raw_value"] == "2026-07-29 17:01:00" and first["normalized_value"] is None
+    assert first["timezone"] == "timezone_unknown" and first["adopted"] is False
+    assert "timezone_unknown" in first["rejection_reason"]
+    assert second["adopted"] is True and second["normalized_value"] == "2026-08-09T11:35:51Z"
+    assert second["timezone"] == "explicit" and second["rejection_reason"] is None
+    assert third["adopted"] is False and "優先度の高い候補" in third["rejection_reason"]
+    assert third["normalized_value"] is not None and third["raw_value"] == repr(epoch)
+    # 解釈条件あり:①を採用し、条件が記録される
+    candidates = evaluate_recording_start_candidates(
+        meta, "2026-08-09T11:35:51Z", epoch, naive_timezone="+09:00",
+        naive_timezone_origin="BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE")
+    assert candidates[0]["adopted"] is True
+    assert candidates[0]["normalized_value"] == "2026-07-29T08:01:00Z"
+    assert candidates[0]["timezone"] == "assumed"
+    assert "+09:00" in candidates[0]["interpretation"]
+    assert candidates[1]["adopted"] is False
+
+
+def test_invalid_leading_tag_does_not_hide_later_valid_tag(monkeypatch, tmp_path):
+    """T-112再レビュー:先頭の作成日時タグが不正でも、後続の有効タグを順に評価して採用する。
+
+    従来は1件目で探索を打ち切り、format.tags.creation_time が壊れているだけで
+    stream 側の有効な creation_time を見逃して Drive modifiedTime(②)へ落ちていた。
+    """
+    import json
+    import subprocess
+    from bio_observer import media_registry
+    from bio_observer.media_registry import (
+        _extract_creation_times, evaluate_recording_start_candidates, probe_media)
+
+    ffprobe_json = {
+        "format": {"duration": "1.0",
+                   "tags": {"creation_time": "not-a-date",                 # 不正
+                            "com.apple.quicktime.creationdate": "2026-07-29 17:01:00"}},  # 表記なし
+        "streams": [
+            {"codec_type": "video", "codec_name": "h264", "width": 64, "height": 64,
+             "avg_frame_rate": "10/1",
+             "tags": {"creation_time": "2026-07-29T08:01:00.000000Z"}},  # 有効(3件目)
+        ],
+    }
+    # 探索順で全タグを返す(1件目で打ち切らない)
+    entries = _extract_creation_times(ffprobe_json)
+    assert [loc for _, loc in entries] == [
+        "format.tags.creation_time",
+        "format.tags.com.apple.quicktime.creationdate",
+        "stream[0].tags.creation_time"]
+
+    fake = tmp_path / "fake.mov"
+    fake.write_bytes(b"\x00")
+    monkeypatch.setattr(media_registry.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(
+                            a[0], 0, stdout=json.dumps(ffprobe_json), stderr=""))
+    meta = probe_media(fake)
+    assert meta.creation_time_tag == "format.tags.creation_time"  # 先頭タグ(後方互換)
+    assert meta.creation_time == "2026-07-29T08:01:00Z"           # 最初に解釈できたタグ
+
+    candidates = evaluate_recording_start_candidates(meta, "2026-08-09T11:35:51Z", 1785000000.0)
+    by_location = {c["location"]: c for c in candidates}
+    assert by_location["format.tags.creation_time"]["adopted"] is False
+    assert by_location["format.tags.creation_time"]["timezone"] == "invalid"
+    assert by_location["format.tags.com.apple.quicktime.creationdate"]["timezone"] == "timezone_unknown"
+    adopted = by_location["stream[0].tags.creation_time"]
+    assert adopted["adopted"] is True and adopted["priority"] == 1
+    assert adopted["normalized_value"] == "2026-07-29T08:01:00Z"
+    assert adopted["source"] == "media_metadata_creation_time"
+    # ②Drive modifiedTime は不採用(理由に採用タグの所在が残る)
+    origin = by_location["取込元(Drive等)の更新時刻"]
+    assert origin["adopted"] is False and "stream[0].tags.creation_time" in origin["rejection_reason"]
+    assert [c["priority"] for c in candidates] == [1, 1, 1, 2, 3]
+    assert [c["order"] for c in candidates] == [1, 2, 3, 4, 5]
+    assert sum(c["adopted"] for c in candidates) == 1
+
+
+def test_recording_start_priority_metadata_first(db, seed, storage,
+                                                 sample_video_with_creation_time):
+    """優先1:動画内メタデータのcreation_timeを採用(取込元時刻・ファイル時刻より優先)。"""
+    result = register_media(db, sample_video_with_creation_time, seed["session"],
+                            storage=storage,
+                            origin_modified_time="2026-08-09T00:00:00Z")
+    row = db.execute("SELECT recording_started_at, recording_start_basis, "
+                     "recording_start_certainty FROM media_asset WHERE id = ?",
+                     (result.media_asset_id,)).fetchone()
+    assert tuple(row) == ("2026-07-29T08:01:00Z", "metadata", "estimated")
+    assert result.recording_start_source == "media_metadata_creation_time"
+    assert result.metadata.creation_time == "2026-07-29T08:01:00Z"
+    assert result.metadata.creation_time_tag == "format.tags.creation_time"
+    # 候補記録が結果に含まれる(①の先頭タグを採用。合成動画は format/stream 両方に
+    # creation_time を持つため候補①が複数並ぶ。②③は不採用理由つき)
+    candidates = result.recording_start_candidates
+    assert candidates[0]["adopted"] is True and candidates[0]["priority"] == 1
+    assert candidates[0]["timezone"] == "explicit"
+    assert sum(c["adopted"] for c in candidates) == 1
+    assert all(c["adopted"] is False and c["rejection_reason"]
+               for c in candidates if c["priority"] in (2, 3))
+    assert [c["priority"] for c in candidates][-2:] == [2, 3]
+
+
+def test_recording_start_priority_origin_modified_second(db, seed, storage, sample_video):
+    """優先2:creation_timeがなければ取込元(Drive等)の更新時刻を採用(basis=file_time)。"""
+    assert probe_media(sample_video).creation_time is None
+    result = register_media(db, sample_video, seed["session"], storage=storage,
+                            origin_modified_time="2026-08-09T01:02:03.456Z")
+    row = db.execute("SELECT recording_started_at, recording_start_basis, "
+                     "recording_start_certainty FROM media_asset WHERE id = ?",
+                     (result.media_asset_id,)).fetchone()
+    assert tuple(row) == ("2026-08-09T01:02:03Z", "file_time", "estimated")
+    assert result.recording_start_source == "origin_modified_time"
+
+
+def test_recording_start_priority_local_mtime_last(db, seed, storage, sample_video):
+    """優先3:creation_timeも取込元時刻もなければローカルファイル時刻(最後の手段)。"""
+    result = register_media(db, sample_video, seed["session"], storage=storage)
+    assert result.recording_start_source == "local_file_mtime"
+    assert result.recording_start_basis == "file_time"
+    assert result.recording_start_certainty == "estimated"
+
+
+def test_metadata_basis_cannot_be_confirmed_automatically(
+        db, seed, storage, sample_video_with_creation_time):
+    """自動取得(metadata)由来を confirmed として指定できない(人の補正のみ)。"""
+    with pytest.raises(ValueError):
+        register_media(db, sample_video_with_creation_time, seed["session"],
+                       storage=storage,
+                       recording_started_at="2026-07-29T08:01:00Z",
+                       recording_start_basis="metadata",
+                       recording_start_certainty="confirmed")
+
+
 def test_probe_media_reports_streams(sample_video, sample_wav):
     video_meta = probe_media(sample_video)
     assert (video_meta.media_type, video_meta.codec) == ("video", "h264")

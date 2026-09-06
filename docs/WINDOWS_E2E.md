@@ -78,6 +78,31 @@ bio-observer status
 
 問題が発生した場合は `bio-observer status` の最終エラーと、`results/<job_id>/status.json` を添えて報告してください(スクリーンショットに正確な座標・フォルダIDが写り込まないよう注意)。
 
+### 観察項目(合否外。T-112の改善効果の比較基準として記録)
+
+撮影開始日時は自動推定(T-112の優先順位:①動画内メタデータcreation_time→②Drive modifiedTime→③ローカル一時ファイル時刻。自動取得は原則estimated、④人の確認・補正のみconfirmed。タイムゾーン表記のない値は `BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE` の明示設定がなければ不採用)。T-112マージ前のmainで実行した場合は③(ダウンロード時刻に近い値)になる既知事項があるため、どの根拠が採用されたか(`status.json` の `recording_start_source` と `recording_start_candidates`)とあわせて記録する。
+
+`results/<job_id>/summary.csv`・`status.json` から以下を記録しておく:
+
+| 観察項目 | IMG_3355 | IMG_3356 |
+|---|---|---|
+| recording_started_at の値 | | |
+| 実際の撮影時刻との差 | | |
+| recording_start_basis | | |
+| recording_start_certainty | | |
+| recording_start_source | | |
+| 動画内creation_time(raw / timezone) | | |
+| Drive modifiedTime | | |
+
+登録せずに候補評価だけ確認する(DB・Driveへ触れない):
+
+```powershell
+bio-observer inspect-time "<DATA_ROOT>\ingest_tmp\<job_id>.mov" --origin-modified-time 2026-08-09T11:35:51Z
+# または受け箱からローカルへ手動ダウンロードしたコピーを指定
+```
+
+実測値の記録先は docs/VERIFICATION_T112.md。
+
 ## 5. 短尺で通った後(次工程)
 
 4時間動画を受け箱へ置いて同じ手順を実行する(空き容量:動画サイズの約2倍以上を確保)。音声抽出・BirdNET/SED・候補クリップは T-102〜T-104 の接続後に `results/` へ追加される。

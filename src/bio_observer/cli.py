@@ -319,6 +319,41 @@ def cmd_status(args) -> int:
         conn.close()
 
 
+# ---------------- inspect-time ----------------
+
+def cmd_inspect_time(args) -> int:
+    """撮影開始日時の候補評価を表示する(登録・DB・Driveへ一切触れない検証用)。"""
+    from bio_observer.media_registry import (
+        ProbeError, evaluate_recording_start_candidates, probe_media)
+
+    storage = StorageConfig.load()
+    source = Path(args.path)
+    try:
+        metadata = probe_media(source, ffprobe=storage.ffprobe)
+    except ProbeError as exc:
+        print(f"[NG] {exc}")
+        return 1
+    candidates = evaluate_recording_start_candidates(
+        metadata, args.origin_modified_time, source.stat().st_mtime,
+        naive_timezone=storage.media_naive_timezone,
+        naive_timezone_origin="BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE")
+    print(f"ファイル: {source.name}")
+    print(f"解釈条件(BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE): "
+          f"{storage.media_naive_timezone or '未設定(表記なしは不採用)'}")
+    for c in candidates:
+        mark = "採用" if c["adopted"] else "不採用"
+        print(f"[{c['priority']}] {c['source']} ({c['location']}) → {mark}")
+        print(f"    raw={c['raw_value']!r}  normalized={c['normalized_value']}  "
+              f"timezone={c['timezone']}")
+        print(f"    解釈: {c['interpretation']}")
+        if c["rejection_reason"]:
+            print(f"    不採用理由: {c['rejection_reason']}")
+    adopted = next(c for c in candidates if c["adopted"])
+    print(f"\n採用値: {adopted['normalized_value']}  basis={adopted['basis']}  "
+          f"certainty=estimated  source={adopted['source']}")
+    return 0
+
+
 # ---------------- entry ----------------
 
 def _positive_int(value: str) -> int:
@@ -368,6 +403,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="IngestJobの一覧・状態・最終エラーを表示")
     status.add_argument("--limit", type=int, default=20, help="表示件数(既定20)")
+
+    inspect = sub.add_parser(
+        "inspect-time",
+        help="動画の撮影開始日時候補(creation_time/取込元時刻/ローカル時刻)の評価を表示"
+             "(登録・DB・Driveへ触れない)")
+    inspect.add_argument("path", help="ローカルの動画・音声ファイル")
+    inspect.add_argument("--origin-modified-time", default=None,
+                         help="取込元の更新時刻(DriveのmodifiedTime等。ISO-8601)")
     return parser
 
 
@@ -384,6 +427,8 @@ def main(argv: list[str] | None = None, *, client_factory=None) -> int:
         return cmd_run(args, client_factory or _default_client_factory)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "inspect-time":
+        return cmd_inspect_time(args)
     raise AssertionError(f"unknown command: {args.command}")
 
 

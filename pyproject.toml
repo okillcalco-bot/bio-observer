@@ -11,6 +11,8 @@ requires-python = ">=3.11,<3.12"
 license = { text = "Proprietary" }
 dependencies = [
     "python-dotenv==1.0.1",
+    # zoneinfo のIANAタイムゾーンDB(Windowsでは同梱されないため固定。T-112)
+    "tzdata==2026.3",
 ]
 
 [project.optional-dependencies]

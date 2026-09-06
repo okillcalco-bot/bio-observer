@@ -18,7 +18,7 @@ import shutil
 import sqlite3
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bio_observer.config import StorageConfig
@@ -71,6 +71,34 @@ class MediaMetadata:
     sample_rate: int | None
     channels: int | None
     duration_seconds: float | None
+    # 動画内メタデータの作成日時:生の値とタグの所在(解釈は候補評価で行う)。
+    # creation_time_raw/tag は先頭のタグ(後方互換)。creation_time_tags は
+    # 探索順(format tags→各stream tags)の全タグ [(raw, 所在), ...]
+    creation_time_raw: str | None = None
+    creation_time_tag: str | None = None
+    creation_time_tags: tuple[tuple[str, str], ...] = ()
+
+    def creation_time_entries(self) -> tuple[tuple[str | None, str | None], ...]:
+        """候補評価に使う作成日時タグの並び(先頭が最優先)。タグなしは (None, None) 1件。"""
+        if self.creation_time_tags:
+            return self.creation_time_tags
+        return ((self.creation_time_raw, self.creation_time_tag),)
+
+    @property
+    def creation_time(self) -> str | None:
+        """タイムゾーンが明示された creation_time の UTC 正規化値(最初に解釈できたタグ)。"""
+        for raw, _tag in self.creation_time_entries():
+            normalized = parse_timestamp(raw).normalized_value
+            if normalized is not None:
+                return normalized
+        return None
+
+
+# 撮影開始日時の自動推定に採用した根拠(RegistrationResult.recording_start_source)
+SOURCE_CALLER = "caller"                      # 呼び出し側の指定(人の入力・補正を含む)
+SOURCE_MEDIA_METADATA = "media_metadata_creation_time"  # 優先1:動画内メタデータ
+SOURCE_ORIGIN_MODIFIED = "origin_modified_time"         # 優先2:取込元(Drive等)の更新時刻
+SOURCE_LOCAL_MTIME = "local_file_mtime"                 # 優先3:ローカルファイル時刻
 
 
 @dataclass(frozen=True)
@@ -79,6 +107,114 @@ class RegistrationResult:
     sha256: str
     relative_path: str
     metadata: MediaMetadata
+    recording_started_at: str | None = None
+    recording_start_basis: str | None = None
+    recording_start_certainty: str | None = None
+    recording_start_source: str = SOURCE_CALLER
+    # 各候補の評価記録(source / raw / normalized / timezone / interpretation /
+    # adopted / rejection_reason)。再現可能性のため呼び出し側が永続化する
+    recording_start_candidates: tuple[dict, ...] = ()
+
+
+_ISO_UTC = "%Y-%m-%dT%H:%M:%SZ"
+_CREATION_TIME_TAGS = ("creation_time", "com.apple.quicktime.creationdate")
+
+# タイムゾーンの判定結果
+TZ_EXPLICIT = "explicit"            # 値にオフセット/Zが明示されている
+TZ_ASSUMED = "assumed"              # 表記なし。設定された解釈条件を適用
+TZ_UNKNOWN = "timezone_unknown"     # 表記なし。解釈根拠がないため不採用
+TZ_INVALID = "invalid"              # 解釈不能な表記
+TZ_MISSING = "missing"              # 値なし
+
+
+@dataclass(frozen=True)
+class ParsedTimestamp:
+    raw_value: str | None
+    normalized_value: str | None   # UTC ISO-8601 "…Z"(採用不可なら None)
+    timezone: str                  # TZ_* のいずれか
+    interpretation: str | None     # 適用した解釈条件(再現可能性のため記録)
+
+
+def _resolve_timezone(name: str):
+    """解釈条件のタイムゾーン指定(±HH:MM の固定オフセット、または IANA 名)を解決する。"""
+    if len(name) == 6 and name[0] in "+-" and name[3] == ":":
+        sign = 1 if name[0] == "+" else -1
+        hours, minutes = int(name[1:3]), int(name[4:6])
+        return timezone(sign * timedelta(hours=hours, minutes=minutes))
+    from zoneinfo import ZoneInfo  # Windowsでは tzdata パッケージが必要(依存に固定)
+    return ZoneInfo(name)
+
+
+def parse_timestamp(value: str | None, *, naive_timezone: str | None = None,
+                    naive_timezone_origin: str | None = None) -> ParsedTimestamp:
+    """日時文字列を解釈し、UTC ISO-8601 へ正規化する(T-112)。
+
+    受理:ISO-8601(Z / ±HH:MM / ±HHMM / 小数秒)、"YYYY-MM-DD HH:MM:SS"。
+    **タイムゾーン表記のない値は自動でUTCとみなさない。** naive_timezone(機器・
+    調査設定に基づく明示的な解釈条件)が与えられた場合のみ適用し、その条件を
+    interpretation に記録する。与えられなければ timezone_unknown として不採用
+    (normalized_value=None)。
+    """
+    if not value:
+        return ParsedTimestamp(value, None, TZ_MISSING, "値なし")
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    if len(text) >= 5 and text[-5] in "+-" and text[-3] != ":" and text[-4:].isdigit():
+        text = text[:-2] + ":" + text[-2:]  # ±HHMM → ±HH:MM
+    text = text.replace(" ", "T", 1)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return ParsedTimestamp(value, None, TZ_INVALID, "ISO-8601として解釈不能")
+    if parsed.tzinfo is not None:
+        offset = parsed.utcoffset()
+        return ParsedTimestamp(
+            value, parsed.astimezone(timezone.utc).strftime(_ISO_UTC), TZ_EXPLICIT,
+            f"明示オフセット {offset}" if offset else "明示UTC(Z)")
+    if naive_timezone:
+        try:
+            tz = _resolve_timezone(naive_timezone)
+        except Exception:
+            return ParsedTimestamp(value, None, TZ_INVALID,
+                                   f"解釈条件のタイムゾーン指定が不正: {naive_timezone}")
+        localized = parsed.replace(tzinfo=tz)
+        origin = f"({naive_timezone_origin})" if naive_timezone_origin else ""
+        return ParsedTimestamp(
+            value, localized.astimezone(timezone.utc).strftime(_ISO_UTC), TZ_ASSUMED,
+            f"タイムゾーン表記なし。設定された解釈条件 {naive_timezone}{origin} を適用")
+    return ParsedTimestamp(value, None, TZ_UNKNOWN,
+                           "タイムゾーン表記なし。解釈根拠がないため不採用")
+
+
+def normalize_utc_iso(value: str | None, *, naive_timezone: str | None = None) -> str | None:
+    """parse_timestamp の簡易版(正規化値のみ。表記なしは解釈条件がなければ None)。"""
+    return parse_timestamp(value, naive_timezone=naive_timezone).normalized_value
+
+
+def _extract_creation_times(data: dict) -> tuple[tuple[str, str], ...]:
+    """format tags → 各stream tags の順で作成日時タグを**すべて**集め、
+    [(生の値, タグ所在), ...] を探索順で返す。
+
+    解釈(タイムゾーン判定・正規化)は行わない。採用可否は候補評価で決める。
+    先頭のタグが不正でも後続の有効なタグを見逃さないよう、1件目で打ち切らない。
+    """
+    scopes = [("format", data.get("format", {}).get("tags") or {})]
+    scopes += [(f"stream[{i}]", s.get("tags") or {})
+               for i, s in enumerate(data.get("streams", []))]
+    found: list[tuple[str, str]] = []
+    for scope, tags in scopes:
+        for key in _CREATION_TIME_TAGS:
+            raw = tags.get(key)
+            if raw:
+                found.append((str(raw), f"{scope}.tags.{key}"))
+    return tuple(found)
+
+
+def _extract_creation_time(data: dict) -> tuple[str | None, str | None]:
+    """先頭の作成日時タグのみ返す(後方互換。全件は _extract_creation_times)。"""
+    entries = _extract_creation_times(data)
+    return entries[0] if entries else (None, None)
 
 
 def probe_media(source: str | Path, *, ffprobe: str = "ffprobe") -> MediaMetadata:
@@ -114,6 +250,8 @@ def probe_media(source: str | Path, *, ffprobe: str = "ffprobe") -> MediaMetadat
                 fps = round(int(num) / int(den), 3)
 
     primary = video if video is not None else audio
+    creation_entries = _extract_creation_times(data)
+    creation_raw, creation_tag = creation_entries[0] if creation_entries else (None, None)
     return MediaMetadata(
         media_type="video" if video is not None else "audio",
         codec=primary.get("codec_name"),
@@ -123,6 +261,9 @@ def probe_media(source: str | Path, *, ffprobe: str = "ffprobe") -> MediaMetadat
         sample_rate=int(audio["sample_rate"]) if audio and audio.get("sample_rate") else None,
         channels=audio.get("channels") if audio else None,
         duration_seconds=float(duration) if duration is not None else None,
+        creation_time_raw=creation_raw,
+        creation_time_tag=creation_tag,
+        creation_time_tags=creation_entries,
     )
 
 
@@ -245,6 +386,76 @@ def _validate_recording_start(
         )
 
 
+def evaluate_recording_start_candidates(
+    metadata: MediaMetadata,
+    origin_modified_time: str | None,
+    local_mtime_epoch: float,
+    *,
+    naive_timezone: str | None = None,
+    naive_timezone_origin: str | None = None,
+) -> list[dict]:
+    """撮影開始日時の候補を優先順位で評価し、各候補の記録を返す(T-112)。
+
+    優先順位:①動画内メタデータ creation_time(basis=metadata。format tags→
+    stream tags の探索順で**全タグを順に評価**し、先頭が不正でも後続の有効な
+    タグを採用する)→②取込元の更新時刻(basis=file_time)→③ローカルファイル
+    時刻(basis=file_time)。最初に正規化できた候補を採用(adopted=True)し、
+    他は不採用理由を記録する。priority は優先順位の段(1=①, 2=②, 3=③)で、
+    ①に複数タグがあれば同じ priority=1 の候補が探索順に並ぶ。
+    タイムゾーン表記のない値は naive_timezone(明示的な解釈条件)がなければ
+    timezone_unknown として不採用。自動推定は常に certainty='estimated'。
+    """
+    parsed = [
+        (1, SOURCE_MEDIA_METADATA, "metadata",
+         parse_timestamp(raw, naive_timezone=naive_timezone,
+                         naive_timezone_origin=naive_timezone_origin),
+         tag)
+        for raw, tag in metadata.creation_time_entries()
+    ]
+    parsed += [
+        (2, SOURCE_ORIGIN_MODIFIED, "file_time",
+         parse_timestamp(origin_modified_time, naive_timezone=naive_timezone,
+                         naive_timezone_origin=naive_timezone_origin),
+         "取込元(Drive等)の更新時刻"),
+        (3, SOURCE_LOCAL_MTIME, "file_time",
+         ParsedTimestamp(
+             repr(local_mtime_epoch),
+             datetime.fromtimestamp(local_mtime_epoch, tz=timezone.utc).strftime(_ISO_UTC),
+             TZ_EXPLICIT, "ファイルシステムのmtime(UNIX epoch=UTC)"),
+         "ローカルファイル時刻(最後の手段)"),
+    ]
+    candidates: list[dict] = []
+    adopted_index: int | None = None
+    for index, (priority, source, basis, result, where) in enumerate(parsed):
+        adoptable = result.normalized_value is not None
+        if adoptable and adopted_index is None:
+            adopted_index = index
+            adopted, reason = True, None
+        elif adoptable:
+            adopted, reason = False, (f"より優先度の高い候補({candidates[adopted_index]['source']}"
+                                      f" / {candidates[adopted_index]['location']})を採用")
+        elif result.timezone == TZ_MISSING:
+            adopted, reason = False, "値なし"
+        elif result.timezone == TZ_UNKNOWN:
+            adopted, reason = False, "timezone_unknown:タイムゾーン表記なし・解釈根拠なし"
+        else:
+            adopted, reason = False, f"解釈不能({result.interpretation})"
+        candidates.append({
+            "priority": priority,
+            "order": index + 1,
+            "source": source,
+            "basis": basis,
+            "location": where,
+            "raw_value": result.raw_value,
+            "normalized_value": result.normalized_value,
+            "timezone": result.timezone,
+            "interpretation": result.interpretation,
+            "adopted": adopted,
+            "rejection_reason": reason,
+        })
+    return candidates
+
+
 def register_media(
     conn: sqlite3.Connection,
     source: str | Path,
@@ -254,6 +465,9 @@ def register_media(
     recording_started_at: str | None = None,
     recording_start_basis: str | None = None,
     recording_start_certainty: str | None = None,
+    origin_modified_time: str | None = None,
+    naive_timezone: str | None = None,
+    naive_timezone_origin: str | None = "BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE",
     tz: str | None = None,
     note: str | None = None,
 ) -> RegistrationResult:
@@ -263,8 +477,10 @@ def register_media(
     - 保存先パスは不透明IDのみで構成(元ファイル名を使わない)
     - 既存ファイルとの衝突時は、既存ファイルに一切触れず失敗する。例外時に
       削除するのは本呼出しが作成したファイルのみ(D-26)
-    - 撮影開始日時が未指定の場合、ファイル更新時刻から basis='file_time'・
-      certainty='estimated' として推定する(確定として自動断定しない。D-26)
+    - 撮影開始日時が未指定の場合は自動推定する(T-112の優先順位:
+      動画内メタデータ creation_time → 取込元の更新時刻 origin_modified_time
+      (Drive の modifiedTime 等)→ ローカルファイル時刻)。自動推定は常に
+      certainty='estimated'(確定として自動断定しない。D-26)
     - 失敗時はDB行・コピー先ファイルを残さない
 
     トランザクション契約:本関数は接続のトランザクション所有者として振る舞い、
@@ -279,16 +495,21 @@ def register_media(
     if ext not in SUPPORTED_EXTENSIONS:
         raise ProbeError(f"対応形式ではありません: {ext}(対応: {sorted(SUPPORTED_EXTENSIONS)})")
 
-    # 撮影開始日時(未指定ならファイル更新時刻からの推定 = estimated)
+    # 撮影開始日時(未指定なら優先順位に従って自動推定 = estimated)
     _validate_recording_start(recording_start_basis, recording_start_certainty)
-    file_mtime_iso = (
-        datetime.fromtimestamp(source.stat().st_mtime, tz=timezone.utc)
-        .isoformat(timespec="seconds").replace("+00:00", "Z")
-    )
+    local_mtime = source.stat().st_mtime
+    file_mtime_iso = datetime.fromtimestamp(local_mtime, tz=timezone.utc).strftime(_ISO_UTC)
+    recording_start_source = SOURCE_CALLER
+    candidates: list[dict] = []
     if recording_started_at is None:
-        recording_started_at = file_mtime_iso
-        recording_start_basis = "file_time"
+        candidates = evaluate_recording_start_candidates(
+            metadata, origin_modified_time, local_mtime,
+            naive_timezone=naive_timezone, naive_timezone_origin=naive_timezone_origin)
+        adopted = next(c for c in candidates if c["adopted"])  # ③は常に採用可能
+        recording_started_at = adopted["normalized_value"]
+        recording_start_basis = adopted["basis"]
         recording_start_certainty = "estimated"
+        recording_start_source = adopted["source"]
 
     # 保存先(不透明IDのみでパスを構成)
     project_id, site_id, station_id = _session_chain(conn, survey_session_id)
@@ -365,4 +586,9 @@ def register_media(
         sha256=sha256,
         relative_path=relative_path,
         metadata=metadata,
+        recording_started_at=recording_started_at,
+        recording_start_basis=recording_start_basis,
+        recording_start_certainty=recording_start_certainty,
+        recording_start_source=recording_start_source,
+        recording_start_candidates=tuple(candidates),
     )

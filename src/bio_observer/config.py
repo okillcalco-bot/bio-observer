@@ -28,6 +28,9 @@ class StorageConfig:
     ffmpeg: str
     ffprobe: str
     tz: str
+    # 動画内メタデータの日時にタイムゾーン表記がない場合の解釈条件(機器・調査設定
+    # に基づく明示指定。例 "+09:00" / "Asia/Tokyo")。未設定なら表記なしは不採用(T-112)
+    media_naive_timezone: str | None = None
 
     @classmethod
     def load(cls, env_file: str | os.PathLike | None = None) -> "StorageConfig":
@@ -49,4 +52,5 @@ class StorageConfig:
             ffmpeg=os.environ.get(f"{_PREFIX}FFMPEG", "") or "ffmpeg",
             ffprobe=os.environ.get(f"{_PREFIX}FFPROBE", "") or "ffprobe",
             tz=os.environ.get(f"{_PREFIX}TZ", "Asia/Tokyo"),
+            media_naive_timezone=os.environ.get(f"{_PREFIX}MEDIA_NAIVE_TIMEZONE", "") or None,
         )
