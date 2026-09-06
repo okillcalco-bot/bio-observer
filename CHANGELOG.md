@@ -1,5 +1,11 @@
 # 変更履歴(CHANGELOG.md)
 
+## 2026-09-06(T-112再レビュー対応:動画内タグの順次評価。Issue #12)
+
+- probe_media が作成日時タグを format tags → 各 stream tags の探索順で**すべて**取得(`MediaMetadata.creation_time_tags`)。候補評価は各タグを候補①として順に評価し、先頭が不正でも後続の有効タグを採用(以前は1件目で打ち切り、Drive modifiedTime へ落ちていた)。候補記録に `order` を追加(priority は優先順位の段のまま)
+- docs/VERIFICATION_T112.md:未実測欄を明示(「未実測」・記入者・手順)、再レビュー対応と自動テストでの代替確認を追記
+- 回帰テスト1件追加(全93件パス)。スキーマ・既存レコード無変更
+
 ## 2026-08-09(T-112 撮影開始時刻の根拠優先順位。Issue #12)
 
 - probe_media が動画内メタデータの creation_time(format/stream tags、com.apple.quicktime.creationdate も対象)を生の値+タグ所在として取得。`parse_timestamp` がZ/±HH:MM/±HHMM/小数秒/空白区切りをUTCへ正規化

@@ -458,6 +458,61 @@ def test_candidate_records_are_reproducible(sample_video):
     assert candidates[1]["adopted"] is False
 
 
+def test_invalid_leading_tag_does_not_hide_later_valid_tag(monkeypatch, tmp_path):
+    """T-112再レビュー:先頭の作成日時タグが不正でも、後続の有効タグを順に評価して採用する。
+
+    従来は1件目で探索を打ち切り、format.tags.creation_time が壊れているだけで
+    stream 側の有効な creation_time を見逃して Drive modifiedTime(②)へ落ちていた。
+    """
+    import json
+    import subprocess
+    from bio_observer import media_registry
+    from bio_observer.media_registry import (
+        _extract_creation_times, evaluate_recording_start_candidates, probe_media)
+
+    ffprobe_json = {
+        "format": {"duration": "1.0",
+                   "tags": {"creation_time": "not-a-date",                 # 不正
+                            "com.apple.quicktime.creationdate": "2026-07-29 17:01:00"}},  # 表記なし
+        "streams": [
+            {"codec_type": "video", "codec_name": "h264", "width": 64, "height": 64,
+             "avg_frame_rate": "10/1",
+             "tags": {"creation_time": "2026-07-29T08:01:00.000000Z"}},  # 有効(3件目)
+        ],
+    }
+    # 探索順で全タグを返す(1件目で打ち切らない)
+    entries = _extract_creation_times(ffprobe_json)
+    assert [loc for _, loc in entries] == [
+        "format.tags.creation_time",
+        "format.tags.com.apple.quicktime.creationdate",
+        "stream[0].tags.creation_time"]
+
+    fake = tmp_path / "fake.mov"
+    fake.write_bytes(b"\x00")
+    monkeypatch.setattr(media_registry.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(
+                            a[0], 0, stdout=json.dumps(ffprobe_json), stderr=""))
+    meta = probe_media(fake)
+    assert meta.creation_time_tag == "format.tags.creation_time"  # 先頭タグ(後方互換)
+    assert meta.creation_time == "2026-07-29T08:01:00Z"           # 最初に解釈できたタグ
+
+    candidates = evaluate_recording_start_candidates(meta, "2026-08-09T11:35:51Z", 1785000000.0)
+    by_location = {c["location"]: c for c in candidates}
+    assert by_location["format.tags.creation_time"]["adopted"] is False
+    assert by_location["format.tags.creation_time"]["timezone"] == "invalid"
+    assert by_location["format.tags.com.apple.quicktime.creationdate"]["timezone"] == "timezone_unknown"
+    adopted = by_location["stream[0].tags.creation_time"]
+    assert adopted["adopted"] is True and adopted["priority"] == 1
+    assert adopted["normalized_value"] == "2026-07-29T08:01:00Z"
+    assert adopted["source"] == "media_metadata_creation_time"
+    # ②Drive modifiedTime は不採用(理由に採用タグの所在が残る)
+    origin = by_location["取込元(Drive等)の更新時刻"]
+    assert origin["adopted"] is False and "stream[0].tags.creation_time" in origin["rejection_reason"]
+    assert [c["priority"] for c in candidates] == [1, 1, 1, 2, 3]
+    assert [c["order"] for c in candidates] == [1, 2, 3, 4, 5]
+    assert sum(c["adopted"] for c in candidates) == 1
+
+
 def test_recording_start_priority_metadata_first(db, seed, storage,
                                                  sample_video_with_creation_time):
     """優先1:動画内メタデータのcreation_timeを採用(取込元時刻・ファイル時刻より優先)。"""
@@ -471,9 +526,15 @@ def test_recording_start_priority_metadata_first(db, seed, storage,
     assert result.recording_start_source == "media_metadata_creation_time"
     assert result.metadata.creation_time == "2026-07-29T08:01:00Z"
     assert result.metadata.creation_time_tag == "format.tags.creation_time"
-    # 候補記録が結果に含まれる(①採用、②③は不採用理由つき)
-    assert [c["adopted"] for c in result.recording_start_candidates] == [True, False, False]
-    assert result.recording_start_candidates[0]["timezone"] == "explicit"
+    # 候補記録が結果に含まれる(①の先頭タグを採用。合成動画は format/stream 両方に
+    # creation_time を持つため候補①が複数並ぶ。②③は不採用理由つき)
+    candidates = result.recording_start_candidates
+    assert candidates[0]["adopted"] is True and candidates[0]["priority"] == 1
+    assert candidates[0]["timezone"] == "explicit"
+    assert sum(c["adopted"] for c in candidates) == 1
+    assert all(c["adopted"] is False and c["rejection_reason"]
+               for c in candidates if c["priority"] in (2, 3))
+    assert [c["priority"] for c in candidates][-2:] == [2, 3]
 
 
 def test_recording_start_priority_origin_modified_second(db, seed, storage, sample_video):

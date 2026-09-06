@@ -11,7 +11,7 @@
 
 ## T-112実装の要点(レビュー観点)
 
-- `media_registry.probe_media`:creation_time(format tags→stream tags、com.apple.quicktime.creationdate も対象)を生の値+タグ所在で取得。`parse_timestamp` がUTC正規化し、**タイムゾーン表記なしは timezone_unknown として不採用**(明示的な解釈条件 `BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE` がある場合のみ assumed として採用し条件を記録)。tzdata を依存に追加
+- `media_registry.probe_media`:creation_time(format tags→stream tags、com.apple.quicktime.creationdate も対象)を生の値+タグ所在で**全タグ**取得(`creation_time_tags`)。候補評価は各タグを候補①として探索順に評価し、先頭が不正でも後続の有効タグを採用(再レビュー対応。以前は1件目で打ち切り)。`parse_timestamp` がUTC正規化し、**タイムゾーン表記なしは timezone_unknown として不採用**(明示的な解釈条件 `BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE` がある場合のみ assumed として採用し条件を記録)。tzdata を依存に追加
 - `register_media`:未指定時の自動推定を `evaluate_recording_start_candidates` で優先順位化(①metadata creation_time→②origin_modified_time(Drive modifiedTime。createdTimeは不使用)→③local mtime)。自動推定は常にestimated。confirmedは basis=manual/corrected のみ(既存ポリシー維持)
 - **候補記録**:各候補の source/raw/normalized/timezone/解釈条件/採否/不採用理由を `RegistrationResult.recording_start_candidates` → ingest_event(registered遷移detail)→ status.json に保持。スキーマ変更なし・既存レコードのバックフィルなし
 - ワーカー:`origin_modified_time=job["modified_time"]`・`naive_timezone=storage.media_naive_timezone` を渡す。`_reload` ヘルパーで再取得コードを整理。CLIに `inspect-time`(読み取り専用の候補評価)を追加

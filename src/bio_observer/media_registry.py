@@ -71,14 +71,27 @@ class MediaMetadata:
     sample_rate: int | None
     channels: int | None
     duration_seconds: float | None
-    # 動画内メタデータの作成日時:生の値とタグの所在(解釈は候補評価で行う)
+    # 動画内メタデータの作成日時:生の値とタグの所在(解釈は候補評価で行う)。
+    # creation_time_raw/tag は先頭のタグ(後方互換)。creation_time_tags は
+    # 探索順(format tags→各stream tags)の全タグ [(raw, 所在), ...]
     creation_time_raw: str | None = None
     creation_time_tag: str | None = None
+    creation_time_tags: tuple[tuple[str, str], ...] = ()
+
+    def creation_time_entries(self) -> tuple[tuple[str | None, str | None], ...]:
+        """候補評価に使う作成日時タグの並び(先頭が最優先)。タグなしは (None, None) 1件。"""
+        if self.creation_time_tags:
+            return self.creation_time_tags
+        return ((self.creation_time_raw, self.creation_time_tag),)
 
     @property
     def creation_time(self) -> str | None:
-        """タイムゾーンが明示された creation_time の UTC 正規化値(表記なしは None)。"""
-        return parse_timestamp(self.creation_time_raw).normalized_value
+        """タイムゾーンが明示された creation_time の UTC 正規化値(最初に解釈できたタグ)。"""
+        for raw, _tag in self.creation_time_entries():
+            normalized = parse_timestamp(raw).normalized_value
+            if normalized is not None:
+                return normalized
+        return None
 
 
 # 撮影開始日時の自動推定に採用した根拠(RegistrationResult.recording_start_source)
@@ -179,20 +192,29 @@ def normalize_utc_iso(value: str | None, *, naive_timezone: str | None = None) -
     return parse_timestamp(value, naive_timezone=naive_timezone).normalized_value
 
 
-def _extract_creation_time(data: dict) -> tuple[str | None, str | None]:
-    """format tags → 各stream tags の順で作成日時タグを探し、(生の値, タグ名) を返す。
+def _extract_creation_times(data: dict) -> tuple[tuple[str, str], ...]:
+    """format tags → 各stream tags の順で作成日時タグを**すべて**集め、
+    [(生の値, タグ所在), ...] を探索順で返す。
 
     解釈(タイムゾーン判定・正規化)は行わない。採用可否は候補評価で決める。
+    先頭のタグが不正でも後続の有効なタグを見逃さないよう、1件目で打ち切らない。
     """
     scopes = [("format", data.get("format", {}).get("tags") or {})]
     scopes += [(f"stream[{i}]", s.get("tags") or {})
                for i, s in enumerate(data.get("streams", []))]
+    found: list[tuple[str, str]] = []
     for scope, tags in scopes:
         for key in _CREATION_TIME_TAGS:
             raw = tags.get(key)
             if raw:
-                return raw, f"{scope}.tags.{key}"
-    return None, None
+                found.append((str(raw), f"{scope}.tags.{key}"))
+    return tuple(found)
+
+
+def _extract_creation_time(data: dict) -> tuple[str | None, str | None]:
+    """先頭の作成日時タグのみ返す(後方互換。全件は _extract_creation_times)。"""
+    entries = _extract_creation_times(data)
+    return entries[0] if entries else (None, None)
 
 
 def probe_media(source: str | Path, *, ffprobe: str = "ffprobe") -> MediaMetadata:
@@ -228,7 +250,8 @@ def probe_media(source: str | Path, *, ffprobe: str = "ffprobe") -> MediaMetadat
                 fps = round(int(num) / int(den), 3)
 
     primary = video if video is not None else audio
-    creation_raw, creation_tag = _extract_creation_time(data)
+    creation_entries = _extract_creation_times(data)
+    creation_raw, creation_tag = creation_entries[0] if creation_entries else (None, None)
     return MediaMetadata(
         media_type="video" if video is not None else "audio",
         codec=primary.get("codec_name"),
@@ -240,6 +263,7 @@ def probe_media(source: str | Path, *, ffprobe: str = "ffprobe") -> MediaMetadat
         duration_seconds=float(duration) if duration is not None else None,
         creation_time_raw=creation_raw,
         creation_time_tag=creation_tag,
+        creation_time_tags=creation_entries,
     )
 
 
@@ -372,22 +396,28 @@ def evaluate_recording_start_candidates(
 ) -> list[dict]:
     """撮影開始日時の候補を優先順位で評価し、各候補の記録を返す(T-112)。
 
-    優先順位:①動画内メタデータ creation_time(basis=metadata)→②取込元の
-    更新時刻(basis=file_time)→③ローカルファイル時刻(basis=file_time)。
-    最初に正規化できた候補を採用(adopted=True)し、他は不採用理由を記録する。
+    優先順位:①動画内メタデータ creation_time(basis=metadata。format tags→
+    stream tags の探索順で**全タグを順に評価**し、先頭が不正でも後続の有効な
+    タグを採用する)→②取込元の更新時刻(basis=file_time)→③ローカルファイル
+    時刻(basis=file_time)。最初に正規化できた候補を採用(adopted=True)し、
+    他は不採用理由を記録する。priority は優先順位の段(1=①, 2=②, 3=③)で、
+    ①に複数タグがあれば同じ priority=1 の候補が探索順に並ぶ。
     タイムゾーン表記のない値は naive_timezone(明示的な解釈条件)がなければ
     timezone_unknown として不採用。自動推定は常に certainty='estimated'。
     """
     parsed = [
-        (SOURCE_MEDIA_METADATA, "metadata",
-         parse_timestamp(metadata.creation_time_raw, naive_timezone=naive_timezone,
+        (1, SOURCE_MEDIA_METADATA, "metadata",
+         parse_timestamp(raw, naive_timezone=naive_timezone,
                          naive_timezone_origin=naive_timezone_origin),
-         metadata.creation_time_tag),
-        (SOURCE_ORIGIN_MODIFIED, "file_time",
+         tag)
+        for raw, tag in metadata.creation_time_entries()
+    ]
+    parsed += [
+        (2, SOURCE_ORIGIN_MODIFIED, "file_time",
          parse_timestamp(origin_modified_time, naive_timezone=naive_timezone,
                          naive_timezone_origin=naive_timezone_origin),
          "取込元(Drive等)の更新時刻"),
-        (SOURCE_LOCAL_MTIME, "file_time",
+        (3, SOURCE_LOCAL_MTIME, "file_time",
          ParsedTimestamp(
              repr(local_mtime_epoch),
              datetime.fromtimestamp(local_mtime_epoch, tz=timezone.utc).strftime(_ISO_UTC),
@@ -396,13 +426,14 @@ def evaluate_recording_start_candidates(
     ]
     candidates: list[dict] = []
     adopted_index: int | None = None
-    for index, (source, basis, result, where) in enumerate(parsed):
+    for index, (priority, source, basis, result, where) in enumerate(parsed):
         adoptable = result.normalized_value is not None
         if adoptable and adopted_index is None:
             adopted_index = index
             adopted, reason = True, None
         elif adoptable:
-            adopted, reason = False, f"より優先度の高い候補({candidates[adopted_index]['source']})を採用"
+            adopted, reason = False, (f"より優先度の高い候補({candidates[adopted_index]['source']}"
+                                      f" / {candidates[adopted_index]['location']})を採用")
         elif result.timezone == TZ_MISSING:
             adopted, reason = False, "値なし"
         elif result.timezone == TZ_UNKNOWN:
@@ -410,7 +441,8 @@ def evaluate_recording_start_candidates(
         else:
             adopted, reason = False, f"解釈不能({result.interpretation})"
         candidates.append({
-            "priority": index + 1,
+            "priority": priority,
+            "order": index + 1,
             "source": source,
             "basis": basis,
             "location": where,
