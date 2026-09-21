@@ -1,6 +1,6 @@
 # 変更履歴(CHANGELOG.md)
 
-## 2026-09-21(T-113 取込ワーカー・CLIの堅牢性修正。Issue #14、PR #15。初版 2026-09-05、Codexレビュー対応2回+自己レビュー1周を含む。スキーマ変更なし)
+## 2026-09-21(T-113 取込ワーカー・CLIの堅牢性修正。Issue #14、PR #15。初版 2026-09-05、Codexレビュー対応2回+自己レビュー2周を含む。スキーマ変更なし)
 
 - ワーカー:ジョブ単位の例外捕捉を `Exception` へ拡大(Drive API の HttpError 等で run_cycle 全体が停止していた)。KeyboardInterrupt は従来どおり通す
 - ワーカー:waiting_for_upload 段階の失敗は retry_count を消費せず待機継続(IngestEvent に error を記録)。failed 判定はダウンロード以降の失敗に限定
@@ -34,6 +34,18 @@
 - media_registry:parse_timestamp は日付+時刻のみ受理(日付のみ・`2026-07-29+09:00` は不採用)。オフセットの時分範囲検査。basis/certainty の列挙外をコピー前に ValueError。ffprobe 不在・タイムアウトを ProbeError に統一
 - 文書:README に inspect-time・終了コード・drive extra、WINDOWS_E2E に exit 2 時の対処、.gitignore に credentials*/client_secret*/token*.json、D-29 の旧関数名の注記と reason 一覧の補完
 - 回帰テスト13件追加(全129件パス。drive extra なしでは 124 passed / 5 skipped)。pyflakes クリーン
+
+### 2026-09-21 自己レビュー第2周(同PR。クラッシュ/再開/重複の精密注入+実 Google クライアント経路)
+
+- ワーカー:登録 commit 直後〜registered 遷移前のクラッシュ後の再開で、自ジョブの資産(note)を採用(従来は再コピー→「自分の資産の重複」として完了し系譜と候補記録が食い違った)
+- ワーカー:一時DLファイルを登録決着・完了・failed 到達時に冪等に回収(遷移と unlink の間のクラッシュ・再試行上限で数GBが永久に残っていた)
+- ワーカー:retry_required から downloading/downloaded へ再開する際、Drive 上の size/modifiedTime が変化していれば一時ファイルを捨てて安定確認からやり直し(一時停止したアップロードの部分ファイルを使い続けて failed→完成後も永久に取込不能、を解消)
+- ワーカー/Driveクライアント:`files.get` に trashed を含め、発見後にゴミ箱へ移動されたファイルは再試行せず failed(DL・登録・結果返却しない)
+- errors:トークン応答が HTML(LB/プロキシの一時障害)の RefreshError は transient。PySocks のプロキシ例外(errno=None・socket_err)を内側の例外で分類
+- 依存:drive extra に PySocks==1.7.1 を追加(無いと httplib2 が HTTPS_PROXY を黙って無視して直結)
+- CLI:初期化失敗の案内を原因で分岐(通信系/認証系)。座標ガードに NFKC 正規化と空白・`;`・`/` 区切りの小数の組
+- 文書:同一 File ID の内容差し替えは再取込されない旨(D-27・E2E)、confirmations=1 の注意(.env.example)、originals/ 孤児掃除は未実装(D-26 訂正)、D-29 追記
+- 回帰テスト8件(10ケース)追加(全137件パス。drive extra なしでは 131 passed / 6 skipped)。pyflakes クリーン
 
 ## 2026-09-06(T-112再レビュー対応:動画内タグの順次評価。Issue #12)
 

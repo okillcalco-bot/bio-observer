@@ -4,6 +4,7 @@
 E2EスモークテストはWindows解析PC上で実施)。メディアは合成のみ使用。
 """
 
+import hashlib
 import json
 import subprocess
 
@@ -51,14 +52,19 @@ class FakeDrive:
         self.files[file_id]["content"] = content
         self.files[file_id]["modified"] += "!"
 
+    def trash(self, file_id: str):
+        """利用者が発見後にファイルをゴミ箱へ移動した状況(受け箱一覧からは消える)。"""
+        self.files[file_id]["trashed"] = True
+
     def _info(self, file_id: str) -> DriveFileInfo:
         f = self.files[file_id]
         return DriveFileInfo(file_id=file_id, name=f["name"], mime_type=f["mime"],
-                             size_bytes=len(f["content"]), modified_time=f["modified"])
+                             size_bytes=len(f["content"]), modified_time=f["modified"],
+                             trashed=f.get("trashed", False))
 
     def list_files(self, folder_id):
         return [self._info(fid) for fid, f in self.files.items()
-                if f["parent"] == folder_id]
+                if f["parent"] == folder_id and not f.get("trashed")]
 
     def get_file_info(self, file_id):
         return self._info(file_id)
@@ -878,6 +884,156 @@ def test_short_or_alias_folder_ids_are_not_redacted(db, seed, storage, cfg, samp
                                                 worker.all_secrets(cfg_long))
     worker.remember_secret("gfold01")  # 短い取得値も登録されない
     assert "gfold01" not in worker.all_secrets(cfg_root)
+
+
+def _tmp_files(storage):
+    d = storage.data_root / "ingest_tmp"
+    return sorted(p.name for p in d.iterdir()) if d.exists() else []
+
+
+def _crash_after(monkeypatch, target_status: str):
+    """_transition が target_status へ遷移した直後(commit 後)にクラッシュさせる。"""
+    original = worker._transition
+
+    def crashing(conn, job_id, to_status, *a, **k):
+        original(conn, job_id, to_status, *a, **k)
+        if to_status == target_status:
+            monkeypatch.setattr(worker, "_transition", original)
+            raise KeyboardInterrupt
+    monkeypatch.setattr(worker, "_transition", crashing)
+
+
+def test_resume_after_crash_between_register_commit_and_registered_transition(
+        db, seed, storage, cfg, sample_bytes, monkeypatch):
+    """自己レビュー第2周:register_media の commit 直後〜registered 遷移前のクラッシュでは、
+    再開時に自ジョブの資産(note)を採用する(再コピー→「自分の資産の重複」にしない)。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_own.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    original_register = worker.register_media
+
+    def register_then_crash(*a, **k):
+        original_register(*a, **k)  # commit 済み
+        monkeypatch.setattr(worker, "register_media", original_register)
+        raise KeyboardInterrupt
+    monkeypatch.setattr(worker, "register_media", register_then_crash)
+    with pytest.raises(KeyboardInterrupt):
+        run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert job["status"] == "downloaded" and job["media_asset_id"] is None
+    assert db.execute("SELECT COUNT(*) FROM media_asset WHERE note = ?",
+                      (f"ingest:{job['id']}",)).fetchone()[0] == 1
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert summary.completed == 1
+    assert job["status"] == "completed" and job["duplicate_of_media_asset_id"] is None
+    assert job["media_asset_id"] is not None
+    assert db.execute("SELECT COUNT(*) FROM media_asset WHERE note LIKE 'ingest:%'").fetchone()[0] == 1
+    assert any(m and "クラッシュ前に登録済み" in m for (m,) in
+               db.execute("SELECT message FROM ingest_event"))
+    assert _tmp_files(storage) == []
+    status = json.loads(drive.results_files(job["id"])["status.json"])
+    assert status["media_asset_id"] == job["media_asset_id"]
+
+
+@pytest.mark.parametrize("crash_at", ["registered", "uploading_results", "completed"])
+def test_tmp_file_is_not_orphaned_after_crash(db, seed, storage, cfg, sample_bytes,
+                                              monkeypatch, crash_at):
+    """自己レビュー第2周:遷移直後(unlink 前)のクラッシュでも一時DLファイルが残らない。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_orphan.MOV", sample_bytes)
+    if crash_at == "uploading_results":  # 重複経路:同一内容を先に登録しておく
+        drive.add_inbox_file("IMG_first.MOV", sample_bytes)
+        drive.files["gdrv0001"]["parent"] = "elsewhere"  # 最初は2本目だけ処理
+        run_cycle(db, drive, cfg, storage, seed["session"])
+        run_cycle(db, drive, cfg, storage, seed["session"])
+        drive.files["gdrv0001"]["parent"] = "inbox"
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    _crash_after(monkeypatch, crash_at)
+    with pytest.raises(KeyboardInterrupt):
+        run_cycle(db, drive, cfg, storage, seed["session"])
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    statuses = [r[0] for r in db.execute("SELECT status FROM ingest_job")]
+    assert all(s == "completed" for s in statuses)
+    assert _tmp_files(storage) == []
+
+
+def test_tmp_file_removed_when_job_fails(db, seed, storage, cfg, sample_bytes):
+    """自己レビュー第2周:再試行上限で failed になった時点で一時DLファイルを回収する。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_fail.MOV", b"not a video at all" * 1000)  # 登録が必ず失敗
+    for _ in range(cfg.max_retries + 3):
+        run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT status FROM ingest_job").fetchone()
+    assert job["status"] == "failed"
+    assert _tmp_files(storage) == []
+
+
+def test_stalled_upload_is_redownloaded_after_source_changes(db, seed, storage, cfg,
+                                                             sample_bytes):
+    """自己レビュー第2周:一時停止したアップロードの部分ファイルが安定判定を通過して DL・登録失敗
+    しても、Drive 側が変化(アップロード再開・完了)すれば一時ファイルを捨てて安定確認からやり直し、
+    完成したファイルを取り込む(従来は同じ壊れたファイルを再試行し続けて failed→永久に取込不能)。"""
+    drive = FakeDrive()
+    half = sample_bytes[: len(sample_bytes) // 2]
+    fid = drive.add_inbox_file("IMG_stall.MOV", half)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])  # 安定→DL→登録失敗(moov なし)
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert summary.retrying == 1 and job["status"] == "retry_required"
+    assert job["resume_status"] == "downloaded" and job["retry_count"] == 1
+    drive.set_content(fid, sample_bytes)  # アップロード完了
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert summary.waiting == 1 and job["status"] == "waiting_for_upload"
+    assert job["size_bytes"] == len(sample_bytes) and _tmp_files(storage) == []
+    assert any(m and "変化したため" in m for (m,) in db.execute("SELECT message FROM ingest_event"))
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert summary.completed == 1 and job["status"] == "completed"
+    assert db.execute("SELECT sha256 FROM media_asset WHERE id = ?",
+                      (job["media_asset_id"],)).fetchone()[0] == hashlib.sha256(
+        sample_bytes).hexdigest()
+
+
+def test_trashed_file_after_discovery_is_not_ingested(db, seed, storage, cfg, sample_bytes):
+    """自己レビュー第2周:発見後にゴミ箱へ移動されたファイルは DL・登録せず failed(再試行なし)。"""
+    drive = FakeDrive()
+    fid = drive.add_inbox_file("IMG_trash.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    drive.trash(fid)
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert summary.failed == 1 and job["status"] == "failed" and job["retry_count"] == 0
+    assert "ゴミ箱" in job["error"]
+    assert db.execute("SELECT COUNT(*) FROM media_asset WHERE note LIKE 'ingest:%'").fetchone()[0] == 0
+    assert _tmp_files(storage) == []
+    # 再試行段階(downloaded から再開)でゴミ箱へ入った場合も同様
+    fid2 = drive.add_inbox_file("IMG_trash2.MOV", b"broken" * 1000)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    run_cycle(db, drive, cfg, storage, seed["session"])  # 登録失敗→retry_required(downloaded)
+    drive.trash(fid2)
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job2 = db.execute("SELECT status FROM ingest_job WHERE drive_file_id = ?", (fid2,)).fetchone()
+    assert summary.failed == 1 and job2["status"] == "failed"
+
+
+def test_classify_html_token_response_and_proxy_errors():
+    """自己レビュー第2周:トークン応答が HTML(LB/プロキシの一時障害)の RefreshError は transient。
+    PySocks のプロキシ例外(errno=None・socket_err に実エラー)も transient。"""
+    from bio_observer.ingest.errors import AUTH, TRANSIENT, classify_error
+    gauth = pytest.importorskip("google.auth.exceptions")
+    assert classify_error(gauth.RefreshError("<html><body>503 Service Unavailable</body></html>")) == TRANSIENT
+    assert classify_error(gauth.RefreshError("invalid_grant: Token has been expired or revoked.")) == AUTH
+    assert classify_error(gauth.RefreshError("Not all required fields present")) == AUTH
+
+    class ProxyConnectionError(OSError):  # PySocks の形(モジュール socks、socket_err 属性)
+        pass
+    ProxyConnectionError.__module__ = "socks"
+    exc = ProxyConnectionError("Error connecting to HTTP proxy 127.0.0.1:9")
+    exc.socket_err = ConnectionRefusedError(111, "Connection refused")
+    assert exc.errno is None and classify_error(exc) == TRANSIENT
 
 
 def test_ingest_event_append_only(db, seed, cfg):

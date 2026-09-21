@@ -172,7 +172,7 @@ with birdnet.AcousticPredictionSession(model) as s:
 
 **追記(2026-08-09、T-101レビュー対応)**
 - **既存資産の不可侵**:確定先・一時パスが既に存在する場合は、既存ファイルへ一切触れず PathCollisionError で失敗する。例外時に削除するのは**本呼出しが作成したファイルのみ**(一時ファイルは常に本呼出し作成=事前確認で保証、確定ファイルは本呼出しが確定した場合のみ削除)。
-- **排他的・原子的な確定**:`os.replace`(既存を上書きする)を全経路から排除。第一手段は同一ディレクトリ内の `os.link` による確定名の排他的作成。ハードリンク非対応FS(exFAT等)は **errno判別**(EPERM/EOPNOTSUPP/ENOSYS/EINVAL/EXDEVのみフォールバック、ENOSPC等は即失敗)の上で **O_CREAT|O_EXCL による排他的作成+コピー**へフォールバックする。どの経路でも既存ファイルの上書きは構造的に不可能(TOCTOU窓なし)。フォールバック経路では、コピー後に**finalを読み戻してSHA-256・サイズを期待値と照合**し、不一致(コピー破損)時はDB・一時ファイル・確定ファイルを完全に取り消す(DBのハッシュと実ファイルが食い違う状態を残さない)。リンク経路は検証済み一時ファイルと同一inodeを指すため再照合不要。フォールバック経路は rename でないためプロセスクラッシュで部分ファイルが残り得るが、DB行のない孤児ファイルであり原本喪失はない(検出・掃除はT-110の取込ワーカーで扱う)。
+- **排他的・原子的な確定**:`os.replace`(既存を上書きする)を全経路から排除。第一手段は同一ディレクトリ内の `os.link` による確定名の排他的作成。ハードリンク非対応FS(exFAT等)は **errno判別**(EPERM/EOPNOTSUPP/ENOSYS/EINVAL/EXDEVのみフォールバック、ENOSPC等は即失敗)の上で **O_CREAT|O_EXCL による排他的作成+コピー**へフォールバックする。どの経路でも既存ファイルの上書きは構造的に不可能(TOCTOU窓なし)。フォールバック経路では、コピー後に**finalを読み戻してSHA-256・サイズを期待値と照合**し、不一致(コピー破損)時はDB・一時ファイル・確定ファイルを完全に取り消す(DBのハッシュと実ファイルが食い違う状態を残さない)。リンク経路は検証済み一時ファイルと同一inodeを指すため再照合不要。フォールバック経路は rename でないためプロセスクラッシュで部分ファイルが残り得るが、DB行のない孤児ファイルであり原本喪失はない(originals/ 配下の孤児ファイルの検出・掃除は**未実装**。手動掃除。取込ワーカーの一時領域 ingest_tmp/ の回収は T-113 で実装)。
 - **確定後の後処理も完全ロールバック**:`os.link` 成功後の一時ファイル削除に失敗した場合、自分が作成した確定ファイル(リンク)を取り消して例外を再送出する。「DB行のない確定ファイル」が残る経路を塞ぐ。フォールバックのコピー途中失敗も、自分が排他的に作成した確定ファイルのみ削除して再送出する。
 - **トランザクション契約の明文化**:`register_media` は接続のトランザクション所有者として振る舞い、成功時 `conn.commit()`/失敗時 `conn.rollback()` を接続全体へ発行する。呼び出し側の未確定変更と同一トランザクションで合成しないこと。将来、取込ワーカー(T-110)等で他のDB操作と合成する必要が生じた場合はSAVEPOINTによる局所トランザクション化を検討する(非ブロッキング申し送り)。
 
@@ -191,7 +191,7 @@ with birdnet.AcousticPredictionSession(model) as s:
 - **取込状態は専用エンティティで管理**:IngestJob(状態機械)+IngestEvent(追記専用の遷移ログ)を新設(マイグレーション0002、DATA_MODEL.md 3.20/3.21)。解析実行のJobStep/RunEventとは分離する(取込は解析Runの前段であり、RunEventはanalysis_runに紐づくため)。状態変化は上書きに加えて必ずIngestEventへ追記する。
 - **アップロード完了判定**:Drive APIのサイズ・modifiedTimeを**連続N回(既定2回)の確認で不変**のときに完了とみなす(4時間動画の途中取得防止)。観測履歴はstable_probe_jsonに保持。
 - **安全なダウンロード**:一時領域(`<DATA_ROOT>/ingest_tmp`)へ `.part` 拡張子でチャンクDL→取得サイズをDriveメタデータと検証→一時領域内の確定名へ移動。originals/への最終確定と原本保護はregister_media(D-26)が担う。DL済み一時ファイルは登録成功後に削除する(原本はoriginals/とDrive上に存在)。空き容量はDL前に確認。
-- **二重解析防止の二段構え**:同じDrive File IDはUNIQUE制約で再取込しない。別File IDでも同一SHA-256ならregister_mediaのDuplicateMediaErrorを捕捉し、duplicate_of_media_asset_id を記録して完了(新規登録なし)。重複ジョブにも結果(status.json)は返却する。
+- **二重解析防止の二段構え**:同じDrive File IDはUNIQUE制約で再取込しない(**運用上の帰結**:完了後に同じファイルを Drive 上で上書き(同一 File ID のまま内容差し替え)しても新しい内容は取り込まれない。取り直しは新しいファイルとしてアップロードし直す=別 File ID)。別File IDでも同一SHA-256ならregister_mediaのDuplicateMediaErrorを捕捉し、duplicate_of_media_asset_id を記録して完了(新規登録なし)。重複ジョブにも結果(status.json)は返却する。
 - **結果返却**:入力フォルダ直下を汚さず `results/<job_id>/` へ status.json・summary.csv を返却(将来のクリップ・スペクトログラム等はvideo_clips/等のサブフォルダへ追加)。Drive上のフォルダ名はjob id(不透明ID)であり表示名と混同しない。座標・希少種名・地点名は含めない。
 - **再開性**:状態はDBが正。ワーカーの process_pending() は未完了ジョブを状態から続行できる(PC再起動対応)。失敗時は retry_required(復帰先resume_status保持)→上限(既定3回)超過で failed。
 - **解析パイプラインの差込点**:analysis_hook(未指定ならスキップ)として分離。T-102以降のパイプライン実装後に接続する。Issue #6のE2Eスモークテストのうち音声抽出・派生物生成はT-102/T-104接続後に検証する(初回スモークは取込・系譜・再現性・結果返却まで。検出精度は合否条件外)。
@@ -257,6 +257,16 @@ with birdnet.AcousticPredictionSession(model) as s:
 - **解釈条件 TZ の起動前検査**:`BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE` が不正(JST・+9:00・+09:60 等)だと表記なしの creation_time が全件不採用になり原因を誤認しうるため、check-config で NG、run は起動前に拒否する。`_resolve_timezone` は時 ≤23・分 ≤59 のみ受理。
 - **parse_timestamp は日付+時刻のみ受理**:日付のみ(`2026-07-29`)は開始時刻に採用しない。`fromisoformat` が `2026-07-29+09:00` の `+` を区切りと誤解釈する経路も塞ぐ。
 - **basis / certainty の列挙値をコピー前に検証**:列挙外の値は INSERT 時の CHECK 違反(コピー・ハッシュ計算後)ではなく ValueError で早期拒否。`probe_media` は ffprobe 不在・タイムアウトも ProbeError に統一。`status --limit` は 1 以上のみ。
+
+**追記(2026-09-21、自己レビュー第2周。クラッシュ/再開/重複の精密注入と、実 Google クライアント経路=実 discovery+HttpMock・実 RefreshError)**
+- **登録 commit 直後〜registered 遷移前のクラッシュ**:再開時に自ジョブが作成した資産(media_asset.note=`ingest:<job_id>`)を採用して registered へ直行する。従来は原本を再コピー→sha256 重複→「自分の資産の重複」として完了し、系譜(note はこのジョブ、ジョブは重複扱い)と候補評価記録が食い違い、4時間動画では不要な数GBのコピーが走っていた。この経路では候補評価記録(recording_start_candidates)は登録時に保存されなかったため復元できず、イベントにその旨を残す。
+- **一時DLファイルの回収**:`_discard_tmp` を登録決着(registered / 重複)・完了・failed 到達時に冪等に呼ぶ。従来は遷移と unlink の間のクラッシュ、および再試行上限による failed で ingest_tmp/ に確定名ファイル(数GB)が永久に残っていた。
+- **再開時の鮮度確認**:retry_required から downloading / downloaded へ再開する際、Drive 上の size/modifiedTime がジョブ行の観測値から変化していれば一時ファイル(確定名・.part)を捨てて waiting_for_upload へ戻し、安定確認からやり直す(stable_probe_json を初期化)。従来は「アップロードが一時停止して安定判定を通過した部分ファイル」を再試行で使い続けて failed になり、完成後も同一 File ID のため永久に取り込めなかった。
+- **ゴミ箱への移動の検知**:`files.get` はゴミ箱内のファイルも返すため `trashed` を取得し、発見後にゴミ箱へ移動されたファイルは安定確認・再開時に `SourceRemovedError` → 再試行せず failed(retry_count 不変)。受け箱一覧(`trashed = false`)と取込対象の整合をとる。
+- **トークン応答が HTML の RefreshError**:google-auth は応答本文が JSON でないとステータスに関係なく `RefreshError(retryable=False)` を返すため、引数が HTML 文書(`<` 始まりの単一文字列)なら一時障害(transient)として待つ。
+- **PySocks のプロキシ例外**:httplib2 が HTTPS_PROXY 経由で投げる `socks.ProxyConnectionError` 等は OSError 派生だが errno=None で実エラーが socket_err に入る。内側の例外で分類し、socks モジュール由来は transient。さらに **PySocks==1.7.1 を drive extra に追加**(無いと httplib2 は HTTPS_PROXY を黙って無視して直結し、「初期化は成功・Drive API だけ接続不能」になる)。
+- **CLI**:クライアント初期化失敗の案内を原因で分岐(通信系はネットワーク・プロキシの確認、それ以外は credentials/token・再認可)。座標ガードは NFKC 正規化(全角数字)と空白・`;`・`/` 区切りの小数の組にも対応。
+- **文書化した運用上の帰結**:同一 File ID の内容差し替えは再取込されない(D-27 追記・E2E 手順)。stability_confirmations=1 は途中取得のリスク(.env.example)。originals/ の孤児ファイル掃除は未実装(D-26 の記述を訂正)。
 
 ---
 

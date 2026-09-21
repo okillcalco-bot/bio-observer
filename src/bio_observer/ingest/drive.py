@@ -25,6 +25,8 @@ class DriveFileInfo:
     mime_type: str | None
     size_bytes: int | None
     modified_time: str | None
+    # 発見後にゴミ箱へ移動された(受け箱から取り消された)ファイルは取り込まない
+    trashed: bool = False
 
 
 class DriveClient(Protocol):
@@ -122,6 +124,7 @@ class GoogleDriveClient:
             mime_type=item.get("mimeType"),
             size_bytes=int(size) if size is not None else None,
             modified_time=item.get("modifiedTime"),
+            trashed=bool(item.get("trashed", False)),
         )
 
     def list_files(self, folder_id: str) -> list[DriveFileInfo]:
@@ -130,7 +133,7 @@ class GoogleDriveClient:
         while True:
             resp = self._service.files().list(
                 q=f"'{folder_id}' in parents and trashed = false",
-                fields="nextPageToken, files(id, name, mimeType, size, modifiedTime)",
+                fields="nextPageToken, files(id, name, mimeType, size, modifiedTime, trashed)",
                 pageToken=token,
             ).execute()
             files.extend(self._to_info(f) for f in resp.get("files", []))
@@ -139,8 +142,9 @@ class GoogleDriveClient:
                 return files
 
     def get_file_info(self, file_id: str) -> DriveFileInfo:
+        # files.get はゴミ箱内のファイルも返すため trashed を取得して取込側で除外する
         item = self._service.files().get(
-            fileId=file_id, fields="id, name, mimeType, size, modifiedTime"
+            fileId=file_id, fields="id, name, mimeType, size, modifiedTime, trashed"
         ).execute()
         return self._to_info(item)
 

@@ -383,18 +383,21 @@ def test_run_client_init_auth_failure_exits_2(env, capsys):
     code = main(["run", "--session", session, "--once"], client_factory=revoked_factory)
     out = capsys.readouterr().out
     assert code == 2 and "初期化に失敗" in out
-    # 一時的なトークンサーバ障害(retryable)は再認可ではなく通常の失敗(exit 1)
+    # 一時的なトークンサーバ障害(retryable)は再認可ではなく通信系の案内で exit 1
     def outage_factory():
         raise gauth.RefreshError("temporarily_unavailable", retryable=True)
 
     assert main(["run", "--session", session, "--once"], client_factory=outage_factory) == 1
+    out = capsys.readouterr().out
+    assert "ネットワーク・プロキシ" in out and "初回認可" not in out
 
 
 def test_check_config_and_run_reject_invalid_naive_timezone(env, capsys, monkeypatch):
     """自己レビュー:BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE の不正値は check-config で NG、run は起動前に拒否。
     (不正なまま動かすと表記なしの creation_time が全件不採用になり原因を誤認しうる)"""
     session = _setup_session(capsys)
-    for bad in ("JST", "+9:00", "+0900", "+09:60", "Asia/tokyo"):
+    # 大文字小文字違い(Asia/tokyo)は Windows の tzdata では解決されうるため対象外
+    for bad in ("JST", "+9:00", "+0900", "+09:60", "Asia/Nowhere"):
         monkeypatch.setenv("BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE", bad)
         assert main(["check-config"]) == 1, bad
         out = capsys.readouterr().out
@@ -421,7 +424,8 @@ def test_setup_coordinate_guard_allows_direction_labels(env, capsys):
 
     for station in ("ST-12N", "Pond 3E", "2S", "Block 1W"):
         assert setup(station=station) == 0, station
-    for site in ("N12.34 E123.45", "12.34,123.45", "岬 12度34分", "12.34N 123.45E"):
+    for site in ("N12.34 E123.45", "12.34,123.45", "12.34 123.45", "12.34/123.45",
+                 "岬 12度34分", "12.34N 123.45E", "１２．３４５"):  # 全角も NFKC で判定
         assert setup(site=site) == 1, site
     assert setup(pos="5339-23-45") == 0 and setup(pos="53392345") == 0
 

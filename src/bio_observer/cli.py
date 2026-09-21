@@ -17,6 +17,7 @@ import re
 import sqlite3
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 from bio_observer.config import StorageConfig
@@ -94,7 +95,7 @@ def _check_naive_timezone(storage: StorageConfig) -> str | None:
 # 「ST-12N」のような整数+方位の設置点名は許可。明らかな誤入力を防ぐ暫定ガード=D-29)
 _COORDINATE_PATTERNS = (
     re.compile(r"-?\d{1,3}\.\d{3,}"),                          # 小数3桁以上の度表記(例 35.123)
-    re.compile(r"-?\d{1,3}\.\d+\s*,\s*-?\d{1,3}\.\d+"),          # 小数の組(例 35.12,139.87)
+    re.compile(r"-?\d{1,3}\.\d+\s*[,;/\s]\s*[+-]?\d{1,3}\.\d+"),  # 小数の組(35.12,139.87 / 35.12 139.87)
     re.compile(r"[°º]"),                                        # 度記号(DMS表記)
     re.compile(r"\d{1,3}\s*度\s*\d{1,2}\s*分"),                  # 和文DMS(例 35度39分)
     re.compile(r"\b\d{1,3}\.\d+\s*[NSEW]\b", re.I),             # 35.6N / 139.7E(小数+方位)
@@ -103,7 +104,11 @@ _COORDINATE_PATTERNS = (
 
 
 def _looks_like_precise_coordinate(value: str | None) -> bool:
-    return bool(value) and any(p.search(value) for p in _COORDINATE_PATTERNS)
+    if not value:
+        return False
+    # 全角数字・記号(３５．１２３ 等)も判定対象にする
+    text = unicodedata.normalize("NFKC", value)
+    return any(p.search(text) for p in _COORDINATE_PATTERNS)
 
 
 def _open_db(storage: StorageConfig) -> sqlite3.Connection:
@@ -267,14 +272,22 @@ def _default_client_factory():
     return GoogleDriveClient()
 
 
+def _classify_safely(exc: BaseException) -> str:
+    from bio_observer.ingest import errors as ingest_errors
+    try:
+        return ingest_errors.classify_error(exc)
+    except Exception:  # noqa: BLE001
+        return ingest_errors.PERMANENT
+
+
 def _is_auth_failure(exc: BaseException) -> bool:
     from bio_observer.ingest import errors as ingest_errors
-    if isinstance(exc, WorkerFatalError):
-        return True
-    try:
-        return ingest_errors.classify_error(exc) == ingest_errors.AUTH
-    except Exception:  # noqa: BLE001
-        return False
+    return isinstance(exc, WorkerFatalError) or _classify_safely(exc) == ingest_errors.AUTH
+
+
+def _is_transient_failure(exc: BaseException) -> bool:
+    from bio_observer.ingest import errors as ingest_errors
+    return _classify_safely(exc) in ingest_errors.WAITABLE
 
 
 def _print_summary(summary) -> None:
@@ -357,6 +370,9 @@ def cmd_run(args, client_factory) -> int:
                 client = client_factory()
             except Exception as exc:  # noqa: BLE001 — OAuth/設定不備を1行で案内
                 print(f"[NG] Driveクライアントの初期化に失敗: {_redact(exc, cfg)}")
+                if _is_transient_failure(exc):
+                    print("     ネットワーク・プロキシ(HTTPS_PROXY。PySocks が必要)を確認して再実行してください")
+                    return 1
                 print("     credentials/token のパスと初回認可(ブラウザ)を確認してください")
                 # 再認可が必要な失敗(RefreshError 等)はサイクル中と同じ exit 2 で統一
                 return 2 if _is_auth_failure(exc) else 1

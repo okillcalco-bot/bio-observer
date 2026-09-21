@@ -64,6 +64,14 @@ _RATE_LIMIT_REASONS = frozenset({
 _AUTH_REASONS = frozenset({"authError", "UNAUTHENTICATED", "unauthorized"})
 
 
+def _looks_like_html_body_error(exc: BaseException) -> bool:
+    """RefreshError の引数が HTML 文書そのもの(単一の str で '<' 始まり)か。"""
+    args = getattr(exc, "args", ())
+    if len(args) != 1 or not isinstance(args[0], str):
+        return False
+    return args[0].lstrip()[:1] == "<"
+
+
 def _http_status(exc: BaseException) -> int | None:
     """googleapiclient.errors.HttpError 互換(resp.status)から HTTP ステータスを得る。"""
     resp = getattr(exc, "resp", None)
@@ -138,11 +146,24 @@ def classify_error(exc: BaseException) -> str:
     if _AUTH_EXCEPTIONS and isinstance(exc, _AUTH_EXCEPTIONS):
         if getattr(exc, "retryable", False) is True:
             return TRANSIENT
+        # トークン応答の本文が JSON でない(LB/プロキシの HTML エラーページ等)場合、
+        # google-auth はステータスに関係なく retryable=False の RefreshError にする。
+        # 本文が HTML なら一時障害として待つ(再認可を誤案内しない)
+        if _looks_like_html_body_error(exc):
+            return TRANSIENT
         return AUTH
     if isinstance(exc, ssl.SSLCertVerificationError):
         return AUTH
     # 3) 通信断(具体的な型・errno)
     if _TRANSPORT_EXCEPTIONS and isinstance(exc, _TRANSPORT_EXCEPTIONS):
+        return TRANSIENT
+    # PySocks のプロキシ例外(httplib2 が HTTPS_PROXY 経由で投げる)は OSError 派生だが
+    # errno=None で、実際の通信エラーは socket_err に入る:内側で判定する
+    inner = getattr(exc, "socket_err", None)
+    if isinstance(inner, BaseException) and inner is not exc:
+        if classify_error(inner) == TRANSIENT:
+            return TRANSIENT
+    if type(exc).__module__.split(".")[0] == "socks":  # ProxyError 系(接続拒否・407・502等)
         return TRANSIENT
     if _DNS_EXCEPTIONS and isinstance(exc, _DNS_EXCEPTIONS):
         return TRANSIENT
