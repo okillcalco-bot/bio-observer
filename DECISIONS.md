@@ -230,23 +230,33 @@ with birdnet.AcousticPredictionSession(model) as s:
 - **安定確認 probe の防御**:`stable_probe_json` に observed_at が無い場合(旧形式・手動編集)は KeyError にせず基準時刻を再設定して数え直す。
 - **常駐ループの継続**:CLI run は 1 サイクルの失敗(受け箱一覧取得の通信エラー等)で常駐を終了せず、次の interval で再試行する。`--once` では失敗を exit 1 で返す。Drive クライアント初期化(OAuth・credentials 不備)の失敗はトレースバックではなく1行の案内と exit 1 とする。
 - **エラー表示の秘匿**:例外文言に含まれる受け箱・結果フォルダIDはマスク(先頭4文字)して表示する(HttpError はリクエストURLにフォルダIDを含むため。SECURITY.md)。
-- **正確座標に見える入力の拒否**:setup の --project/--site/--station/--rounded-position に、小数3桁以上の度表記(35.123 等)・度記号(°)・方位付き数値(34.98N 等)が含まれる場合はDBへ触れる前に拒否する(D-12 の運用上の防御。メッシュコード等の整数表記は許可)。完全な座標検出ではなく、明らかな誤入力を防ぐ最小限のパターンとする。
+- **正確座標に見える入力の拒否**:setup の --project/--site/--station/--rounded-position に、小数3桁以上の度表記(35.123 等)・小数の組(35.12,139.87)・度記号(°)・和文DMS(35度39分)・小数+方位(34.98N / N34.98)が含まれる場合はDBへ触れる前に拒否する(D-12 の運用上の防御。メッシュコード等の整数表記、「ST-12N」のような整数+方位の設置点名は許可)。完全な座標検出ではなく、明らかな誤入力を防ぐ最小限のパターンとする(2026-09-21 自己レビューで整数+方位の誤拒否を解消)。
 - **呼び出し側指定の撮影開始時刻の早期検証**:register_media へ渡された recording_started_at は parse_timestamp でコピー前に検証・UTC正規化する(表記なし=timezone_unknown・解釈不能=invalid は ValueError)。従来はコピー後の INSERT 時に CHECK 違反として遅く失敗しており、オフセット付き(+09:00)の正しい値も拒否されていた。T-112 の解釈条件(BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE)は自動推定と同じ規則で適用する。
 
 **追記(2026-09-06、T-113 Codexレビュー対応)**
 - **エラー保存経路の秘匿**:例外文言の伏せ字は CLI 表示だけでなく、ワーカーが ingest_job.error / ingest_event(message・detail)へ保存する前にも適用する(`worker.redact_secrets` を保存・表示の共通規則とし、CLI の `_mask` も同じ関数へ委譲)。status は保存済みの値にも表示前に伏せ字を適用する(旧版で未マスクのまま保存された行への防御)。伏せる対象は受け箱・結果フォルダIDで、ローカルパス・Drive File ID(ジョブ列として保持している値)は対象外。
-- **通信断とデータ異常の分離**:完了待ち(waiting_for_upload)で再試行回数を消費しないのは「通信断・一時的な障害」(`_is_transient_error`:OSError系、HTTP 5xx/429、httplib2・googleapiclient 等の通信ライブラリ由来)に限る。ValueError / KeyError 等の内部データ異常や HTTP 4xx(削除・権限不足=待っても直らない)は通常の再試行→上限で failed とし、永久待機にしない。
+- **通信断とデータ異常の分離**:完了待ち(waiting_for_upload)で再試行回数を消費しないのは「通信断・一時的な障害」(`_is_transient_error`:OSError系、HTTP 5xx/429、httplib2・googleapiclient 等の通信ライブラリ由来。**4a61ed9 で `ingest/errors.py` の `classify_error` に置換・廃止**)に限る。ValueError / KeyError 等の内部データ異常や HTTP 4xx(削除・権限不足=待っても直らない)は通常の再試行→上限で failed とし、永久待機にしない。
 - **修復可能な観測情報の初期化**:`stable_probe_json` の壊れたJSON・想定外の形式・不正な observed_at(非文字列・形式不正・naive)・不正な confirmations(非整数・1未満)は、例外にせず観測情報を初期化して再確認する(理由を IngestEvent に記録)。観測情報はワーカーが再確認で作り直せる派生情報であり、初期化しても既存レコード・状態機械に影響しない。
 - **運用判断(調査責任者)**:正常なアップロード待ち・一時通信断は長時間待機を許容する。poll_error_count 等のカラム新設は行わない(IngestEvent の記録で把握する)。座標様入力の拒否パターンは暫定ガードとして維持する。
 
 **追記(2026-09-06、T-113 Codex再レビュー対応)**
 - **例外分類は具体的な型・原因で行う**(`ingest/errors.py`。モジュール名の一括判定・「OSError は全部通信断」・「4xx は全部永続」は採用しない):
   - transient(通信断):ConnectionError / TimeoutError / socket.gaierror・herror / ssl.SSLError(証明書検証失敗を除く)/ http.client.HTTPException / 通信系 errno(ECONNRESET・ETIMEDOUT・EHOSTUNREACH 等)/ google.auth TransportError / httplib2 ServerNotFoundError / HTTP 5xx。
-  - rate_limited:HTTP 429、または 403 で reason が rateLimitExceeded・userRateLimitExceeded・sharingRateLimitExceeded・dailyLimitExceeded(Google「Resolve errors」に基づく。reason は HttpError の error_details → content JSON → 文言中トークンの順で取得)。
-  - auth(人の対応が必要):google.auth RefreshError・DefaultCredentialsError・MalformedError・OAuthError、ssl.SSLCertVerificationError、HTTP 401 / reason authError。
+  - rate_limited:HTTP 429、または 403 で reason が rateLimitExceeded・userRateLimitExceeded・sharingRateLimitExceeded・dailyLimitExceeded、または error.status が RESOURCE_EXHAUSTED(Google「Resolve errors」に基づく。reason は HttpError の error_details → content JSON → 文言中トークンの順で取得)。
+  - auth(人の対応が必要):google.auth RefreshError・DefaultCredentialsError・MalformedError・OAuthError(その他の GoogleAuthError 派生も auth)、ssl.SSLCertVerificationError、HTTP 401 / reason authError・UNAUTHENTICATED・unauthorized。ただし **RefreshError(retryable=True)**(トークンサーバ側の 500/503・temporarily_unavailable 等)は transient として待つ(2026-09-21 自己レビュー)。
   - permanent:上記以外(ValueError 等の内部データ異常、FileNotFoundError・PermissionError・ENOSPC 等のローカルI/O、素の OSError、403 権限不足・storageQuotaExceeded、404、400)。
 - **分類ごとの扱い**:transient / rate_limited は**どの段階でも**再試行回数を消費せず、完了待ちなら待機継続、それ以外は retry_required(resume_status=同じ段階)として次サイクルで再開する(レート制限解除後・障害復旧後に自動再開)。permanent は従来どおり再試行→上限で failed。auth はジョブの状態・再試行回数を変えずに IngestEvent へ記録し、`WorkerFatalError` でサイクルを止める。CLI run は exit 2 で常駐を終了し、再認可・証明書・プロキシ設定の確認を案内する(対処後の run で未完了ジョブから再開。状態はDB保存済み)。
 - **処理中に取得したフォルダIDの秘匿**:設定値(受け箱・結果親フォルダ)に加え、`ensure_folder` が返した results/ と results/<job_id>/ のフォルダIDも伏せ字対象へ登録し(`remember_secret`。プロセス内保持)、例外文言を保存・表示する前に長いものから置換する。dry-run も例外を捕捉して伏せ字で案内する(トレースバックを出さない)。限界:旧版で保存済みの行に含まれる結果フォルダIDは、別プロセスの status では判別できないため伏せられない(該当行があれば手動で error を確認・消去する運用)。
+
+**追記(2026-09-21、自己レビュー第1周。Codexレビューが当面見込めないため、独立した3観点=ワーカー/CLI・時刻/文書・テスト・秘匿=で再現ベースの自己レビューを実施)**
+- **受け箱一覧(discover)の認証エラーも致命扱い**:実クライアントではトークン更新失敗(RefreshError)はサイクル最初の API=受け箱一覧で発生するため、`run_cycle` が discover の例外も分類し auth なら `WorkerFatalError` に変換する(従来はジョブ処理の except しか通らず、CLI が「サイクル失敗」を interval ごとに無限に繰り返し exit 2 に到達しなかった)。クライアント初期化時の auth 失敗も exit 2 に統一。
+- **観測時刻が未来の probe を初期化**:PC 時計のずれ等で observed_at が未来だと間隔判定が永久に成立しないため、不正な観測情報と同様に初期化して数え直す(IngestEvent に理由)。
+- **伏せ字対象の最小長 8 文字**:`root`(マイドライブ別名)や `inbox` のような短い設定値を置換対象にすると、ローカルパスや無関係な文言まで壊れるため、置換は 8 文字以上の値に限定する(Drive ID は 25 文字以上)。表示用 `mask_secret` は長さを問わない。取得フォルダIDの保持は `reset_learned_secrets` でテスト間に破棄する。
+- **分類器の頑健性**:応答本文の想定外の形(errors が list でない等)で分類器自体が例外を出しても、ジョブ隔離を壊さず permanent 扱いにする。
+- **完了時に error を消す**:復旧して completed になった行に旧エラーを残さない(履歴は IngestEvent)。
+- **解釈条件 TZ の起動前検査**:`BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE` が不正(JST・+9:00・+09:60 等)だと表記なしの creation_time が全件不採用になり原因を誤認しうるため、check-config で NG、run は起動前に拒否する。`_resolve_timezone` は時 ≤23・分 ≤59 のみ受理。
+- **parse_timestamp は日付+時刻のみ受理**:日付のみ(`2026-07-29`)は開始時刻に採用しない。`fromisoformat` が `2026-07-29+09:00` の `+` を区切りと誤解釈する経路も塞ぐ。
+- **basis / certainty の列挙値をコピー前に検証**:列挙外の値は INSERT 時の CHECK 違反(コピー・ハッシュ計算後)ではなく ValueError で早期拒否。`probe_media` は ffprobe 不在・タイムアウトも ProbeError に統一。`status --limit` は 1 以上のみ。
 
 ---
 

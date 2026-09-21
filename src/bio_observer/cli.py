@@ -68,14 +68,37 @@ _SECRET_ENV_NAMES = ("BIO_OBSERVER_DRIVE_INBOX_FOLDER_ID",
 
 def _env_secrets() -> tuple[str, ...]:
     """表示前に伏せる設定値(status は DriveIngestConfig を必須としないため環境変数から)。"""
-    return tuple(v for v in (os.environ.get(n) for n in _SECRET_ENV_NAMES) if v)
+    return tuple(v for v in (os.environ.get(n) for n in _SECRET_ENV_NAMES)
+                 if v and len(v) >= worker.MIN_REDACT_LENGTH)
 
 
-# 正確な座標に見える入力を拒否する(SECURITY.md / D-12。メッシュコード等の整数表記は許可)
+def _check_naive_timezone(storage: StorageConfig) -> str | None:
+    """BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE の解釈条件が不正なら NG 文言を返す。
+
+    不正なまま動かすと、表記なしの creation_time が全件「解釈条件が不正」として
+    不採用になり、Drive 更新時刻へ降格する(実測記録で原因を誤認しうる)ため起動前に検査する。
+    """
+    from bio_observer.media_registry import _resolve_timezone
+    value = storage.media_naive_timezone
+    if not value:
+        return None
+    try:
+        _resolve_timezone(value)
+    except Exception:  # noqa: BLE001 — 値不正の種類は問わず案内する
+        return (f"BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE: 解釈条件が不正 {value!r}"
+                "(例: +09:00 / Asia/Tokyo。未設定なら表記なしの時刻は不採用)")
+    return None
+
+
+# 正確な座標に見える入力を拒否する(SECURITY.md / D-12。メッシュコード等の整数表記・
+# 「ST-12N」のような整数+方位の設置点名は許可。明らかな誤入力を防ぐ暫定ガード=D-29)
 _COORDINATE_PATTERNS = (
-    re.compile(r"-?\d{1,3}\.\d{3,}"),                 # 小数3桁以上の度表記(例 35.123)
-    re.compile(r"[°º]"),                              # 度記号(DMS表記)
-    re.compile(r"\b\d{1,3}(\.\d+)?\s*[NSEW]\b", re.I),  # 35.6N / 139E 等
+    re.compile(r"-?\d{1,3}\.\d{3,}"),                          # 小数3桁以上の度表記(例 35.123)
+    re.compile(r"-?\d{1,3}\.\d+\s*,\s*-?\d{1,3}\.\d+"),          # 小数の組(例 35.12,139.87)
+    re.compile(r"[°º]"),                                        # 度記号(DMS表記)
+    re.compile(r"\d{1,3}\s*度\s*\d{1,2}\s*分"),                  # 和文DMS(例 35度39分)
+    re.compile(r"\b\d{1,3}\.\d+\s*[NSEW]\b", re.I),             # 35.6N / 139.7E(小数+方位)
+    re.compile(r"\b[NSEW]\s*\d{1,3}\.\d+", re.I),               # N35.6 / E139.7(方位+小数)
 )
 
 
@@ -211,6 +234,15 @@ def cmd_check_config(_args) -> int:
     for tool in (storage.ffmpeg, storage.ffprobe):
         checks.append(check_command(tool))
 
+    tz_problem = _check_naive_timezone(storage)
+    if tz_problem:
+        checks.append((False, tz_problem))
+    else:
+        checks.append((True, "BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE: "
+                             + (f"{storage.media_naive_timezone}(表記なしの時刻に適用)"
+                                if storage.media_naive_timezone
+                                else "未設定(表記なしの時刻は不採用)")))
+
     try:
         conn = connect(storage.db_path)
         checks.append((True, f"DB: 接続OK(スキーマ版 {schema_version(conn)}。"
@@ -233,6 +265,16 @@ def cmd_check_config(_args) -> int:
 def _default_client_factory():
     from bio_observer.ingest.drive import GoogleDriveClient
     return GoogleDriveClient()
+
+
+def _is_auth_failure(exc: BaseException) -> bool:
+    from bio_observer.ingest import errors as ingest_errors
+    if isinstance(exc, WorkerFatalError):
+        return True
+    try:
+        return ingest_errors.classify_error(exc) == ingest_errors.AUTH
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _print_summary(summary) -> None:
@@ -286,6 +328,10 @@ def cmd_run(args, client_factory) -> int:
         for name in missing:
             print(f"[NG] {name}: 未設定(.env を確認。bio-observer check-config で検査できます)")
         return 1
+    tz_problem = _check_naive_timezone(storage)
+    if tz_problem:
+        print(f"[NG] {tz_problem}")
+        return 1
     cfg = DriveIngestConfig.load()
 
     if args.dry_run:
@@ -312,7 +358,8 @@ def cmd_run(args, client_factory) -> int:
             except Exception as exc:  # noqa: BLE001 — OAuth/設定不備を1行で案内
                 print(f"[NG] Driveクライアントの初期化に失敗: {_redact(exc, cfg)}")
                 print("     credentials/token のパスと初回認可(ブラウザ)を確認してください")
-                return 1
+                # 再認可が必要な失敗(RefreshError 等)はサイクル中と同じ exit 2 で統一
+                return 2 if _is_auth_failure(exc) else 1
             while True:
                 try:
                     summary = worker.run_cycle(conn, client, cfg, storage, args.session)
@@ -408,7 +455,8 @@ def cmd_inspect_time(args) -> int:
           f"{storage.media_naive_timezone or '未設定(表記なしは不採用)'}")
     for c in candidates:
         mark = "採用" if c["adopted"] else "不採用"
-        print(f"[{c['priority']}] {c['source']} ({c['location']}) → {mark}")
+        location = c["location"] or "タグなし"
+        print(f"[{c['priority']}] {c['source']} ({location}) → {mark}")
         print(f"    raw={c['raw_value']!r}  normalized={c['normalized_value']}  "
               f"timezone={c['timezone']}")
         print(f"    解釈: {c['interpretation']}")
@@ -468,7 +516,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="受け箱の一覧と処理予定のみ表示(Drive・DBとも変更しない)")
 
     status = sub.add_parser("status", help="IngestJobの一覧・状態・最終エラーを表示")
-    status.add_argument("--limit", type=int, default=20, help="表示件数(既定20)")
+    status.add_argument("--limit", type=_positive_int, default=20,
+                        help="表示件数(1以上の整数。既定20)")
 
     inspect = sub.add_parser(
         "inspect-time",

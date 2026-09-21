@@ -1,6 +1,6 @@
 # 変更履歴(CHANGELOG.md)
 
-## 2026-09-05(T-113 取込ワーカー・CLIの堅牢性修正。Issue #14。スキーマ変更なし)
+## 2026-09-21(T-113 取込ワーカー・CLIの堅牢性修正。Issue #14、PR #15。初版 2026-09-05、Codexレビュー対応2回+自己レビュー1周を含む。スキーマ変更なし)
 
 - ワーカー:ジョブ単位の例外捕捉を `Exception` へ拡大(Drive API の HttpError 等で run_cycle 全体が停止していた)。KeyboardInterrupt は従来どおり通す
 - ワーカー:waiting_for_upload 段階の失敗は retry_count を消費せず待機継続(IngestEvent に error を記録)。failed 判定はダウンロード以降の失敗に限定
@@ -8,7 +8,7 @@
 - CLI run:1サイクルの失敗で常駐を止めず次の interval で再試行(--once は exit 1)。Drive クライアント初期化失敗は1行案内+exit 1。例外文言中のフォルダIDをマスク表示
 - CLI setup:正確な座標と解釈できる入力(小数3桁以上の度表記・度記号・方位付き数値)をDBへ触れる前に拒否(D-12)
 - register_media:呼び出し側指定の recording_started_at をコピー前に検証・UTC正規化(表記なし・解釈不能は ValueError。+09:00 等は正規化して保存)
-- テスト8件追加(全100件パス)。DB・既存データ・設計方針(D-26〜D-28)は無変更。D-29
+- テスト8件追加(全101件パス)。DB・既存データ・設計方針(D-26〜D-28)は無変更。D-29
 
 ### 2026-09-06 Codexレビュー対応(同PR)
 
@@ -24,6 +24,16 @@
 - 認証・設定エラー(google.auth RefreshError 等・証明書検証失敗・401)は待機せず、ジョブを変えずに記録して `WorkerFatalError` でサイクル停止。CLI run は exit 2 で再認可等を案内
 - 処理中に取得した結果フォルダID(results/・results/<job_id>/)も伏せ字対象に登録し、DB・イベント・表示の全経路で伏せる。dry-run の例外も伏せ字で案内(トレースバックなし)
 - 回帰テスト6件追加(全116件パス。google-auth / googleapiclient の実物例外で分類を検証。drive extra 未導入環境ではその部分を skip)。D-29追記
+
+### 2026-09-21 自己レビュー第1周(同PR。Codexレビューが当面見込めないため独立3観点で再現ベースに実施)
+
+- ワーカー:受け箱一覧(discover)での認証エラーも WorkerFatalError に変換(実クライアントではトークン更新失敗がサイクル最初の API で出るため。従来は「サイクル失敗」の無限ループで exit 2 に到達しなかった)。クライアント初期化時の再認可要求も exit 2 に統一
+- errors:google-auth の RefreshError(retryable=True。トークンサーバ側の一時障害)は auth ではなく transient。応答本文が想定外の形でも分類器が落ちない(落ちても permanent 扱い)。reason に RESOURCE_EXHAUSTED / UNAUTHENTICATED を追加
+- ワーカー:観測時刻が未来の probe を初期化(永久待機の防止)。完了時に ingest_job.error を消す。伏せ字の置換対象を 8 文字以上に限定(`root`/`inbox` 等の短い値で無関係な文言・パスを壊さない)。テスト間で取得フォルダIDを破棄する reset を追加
+- CLI:`BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE` の不正値を check-config で NG、run は起動前に拒否。setup の座標ガードを見直し(整数+方位「ST-12N」は許可、小数の組・和文DMS・方位+小数は拒否)。`status --limit` は 1 以上のみ。inspect-time のタグなし表示
+- media_registry:parse_timestamp は日付+時刻のみ受理(日付のみ・`2026-07-29+09:00` は不採用)。オフセットの時分範囲検査。basis/certainty の列挙外をコピー前に ValueError。ffprobe 不在・タイムアウトを ProbeError に統一
+- 文書:README に inspect-time・終了コード・drive extra、WINDOWS_E2E に exit 2 時の対処、.gitignore に credentials*/client_secret*/token*.json、D-29 の旧関数名の注記と reason 一覧の補完
+- 回帰テスト13件追加(全129件パス。drive extra なしでは 124 passed / 5 skipped)。pyflakes クリーン
 
 ## 2026-09-06(T-112再レビュー対応:動画内タグの順次評価。Issue #12)
 

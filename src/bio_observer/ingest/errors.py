@@ -81,7 +81,10 @@ def _http_status(exc: BaseException) -> int | None:
 def http_error_reasons(exc: BaseException) -> set[str]:
     """HttpError から reason を集める(error_details → content JSON → 文言中の既知トークン)。"""
     reasons: set[str] = set()
-    details = getattr(exc, "error_details", None)
+    try:
+        details = getattr(exc, "error_details", None)  # HttpError のプロパティ(内部で content を解析)
+    except Exception:  # noqa: BLE001 — 壊れた応答本文でも分類器は落とさない
+        details = None
     if isinstance(details, list):
         for d in details:
             if isinstance(d, dict) and d.get("reason"):
@@ -96,11 +99,13 @@ def http_error_reasons(exc: BaseException) -> set[str]:
             data = None
         err = data.get("error") if isinstance(data, dict) else None
         if isinstance(err, dict):
-            for e in (err.get("errors") or []) + (err.get("details") or []):
+            entries = [x for key in ("errors", "details")
+                       if isinstance(err.get(key), list) for x in err[key]]
+            for e in entries:
                 if isinstance(e, dict) and e.get("reason"):
                     reasons.add(str(e["reason"]))
-            if err.get("status"):
-                reasons.add(str(err["status"]))
+            if isinstance(err.get("status"), str):
+                reasons.add(err["status"])
     if not reasons:
         text = str(exc)
         for token in _RATE_LIMIT_REASONS | _AUTH_REASONS:
@@ -127,8 +132,12 @@ def classify_error(exc: BaseException) -> str:
     status = _http_status(exc)
     if status is not None:
         return _classify_http(exc, status)
-    # 2) 認証・設定(人の対応が必要)
+    # 2) 認証・設定(人の対応が必要)。ただし google-auth はトークンサーバ側の一時障害
+    #    (500/503・temporarily_unavailable 等)も RefreshError(retryable=True) で返すため、
+    #    retryable なものは通信断として待つ(再認可を誤案内してワーカーを止めない)
     if _AUTH_EXCEPTIONS and isinstance(exc, _AUTH_EXCEPTIONS):
+        if getattr(exc, "retryable", False) is True:
+            return TRANSIENT
         return AUTH
     if isinstance(exc, ssl.SSLCertVerificationError):
         return AUTH

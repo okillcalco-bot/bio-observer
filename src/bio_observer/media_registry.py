@@ -14,6 +14,7 @@ import errno
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -140,9 +141,15 @@ def _resolve_timezone(name: str):
     if len(name) == 6 and name[0] in "+-" and name[3] == ":":
         sign = 1 if name[0] == "+" else -1
         hours, minutes = int(name[1:3]), int(name[4:6])
+        if hours > 23 or minutes > 59:
+            raise ValueError(f"オフセットの範囲外: {name}")
         return timezone(sign * timedelta(hours=hours, minutes=minutes))
     from zoneinfo import ZoneInfo  # Windowsでは tzdata パッケージが必要(依存に固定)
     return ZoneInfo(name)
+
+
+# 日付+時刻(YYYY-MM-DDTHH… または基本形式 YYYYMMDDTHH…)を要求する
+_DATETIME_SHAPE = re.compile(r"^\d{4}-?\d{2}-?\d{2}T\d{2}")
 
 
 def parse_timestamp(value: str | None, *, naive_timezone: str | None = None,
@@ -163,6 +170,10 @@ def parse_timestamp(value: str | None, *, naive_timezone: str | None = None,
     if len(text) >= 5 and text[-5] in "+-" and text[-3] != ":" and text[-4:].isdigit():
         text = text[:-2] + ":" + text[-2:]  # ±HHMM → ±HH:MM
     text = text.replace(" ", "T", 1)
+    if not _DATETIME_SHAPE.match(text):
+        # 日付のみ("2026-07-29")は開始時刻として採用しない。また fromisoformat は
+        # "2026-07-29+09:00" の '+' を日付/時刻区切りと誤解釈するため、形を先に確認する
+        return ParsedTimestamp(value, None, TZ_INVALID, "日付と時刻の両方を含む表記のみ受理")
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:
@@ -222,11 +233,15 @@ def probe_media(source: str | Path, *, ffprobe: str = "ffprobe") -> MediaMetadat
     source = Path(source)
     if not source.is_file():
         raise ProbeError(f"ファイルがありません: {source}")
-    result = subprocess.run(
-        [ffprobe, "-v", "error", "-print_format", "json",
-         "-show_format", "-show_streams", str(source)],
-        capture_output=True, text=True, timeout=300,
-    )
+    try:
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-print_format", "json",
+             "-show_format", "-show_streams", str(source)],
+            capture_output=True, text=True, timeout=300,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        # ffprobe 不在・実行不可・タイムアウトも ProbeError に統一(呼び出し側の案内用)
+        raise ProbeError(f"ffprobeを実行できません({ffprobe}): {exc}") from exc
     if result.returncode != 0:
         raise ProbeError(f"ffprobe失敗: {result.stderr.strip()[-300:]}")
     try:
@@ -376,9 +391,20 @@ def _finalize_exclusive(part: Path, final: Path,
         raise
 
 
+RECORDING_START_BASES = ("metadata", "file_time", "manual", "corrected")
+RECORDING_START_CERTAINTIES = ("confirmed", "estimated", "unknown")
+
+
 def _validate_recording_start(
     basis: str | None, certainty: str | None
 ) -> None:
+    # 列挙外の値はコピー・ハッシュ計算の前に拒否する(従来は INSERT 時の CHECK 違反で
+    # 4時間動画のコピー後に失敗していた。T-113)
+    if basis is not None and basis not in RECORDING_START_BASES:
+        raise ValueError(f"recording_start_basis が不正: {basis!r}(許容: {RECORDING_START_BASES})")
+    if certainty is not None and certainty not in RECORDING_START_CERTAINTIES:
+        raise ValueError(
+            f"recording_start_certainty が不正: {certainty!r}(許容: {RECORDING_START_CERTAINTIES})")
     # 自動取得(メタデータ・ファイル時刻)由来の日時を「確定」として自動断定しない
     if certainty == "confirmed" and basis not in ("manual", "corrected"):
         raise ValueError(

@@ -253,10 +253,13 @@ def test_run_interval_survives_cycle_failure(env, capsys, monkeypatch):
     session = _setup_session(capsys)
     calls = {"n": 0}
 
+    folder_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456"  # 架空(実IDと同程度の長さ)
+    monkeypatch.setenv("BIO_OBSERVER_DRIVE_INBOX_FOLDER_ID", folder_id)
+
     def flaky_cycle(*args, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise ConnectionError("listing failed: folders/inbox")
+            raise ConnectionError(f"listing failed: folders/{folder_id}")
         raise KeyboardInterrupt  # 2回目で利用者が停止
 
     monkeypatch.setattr(worker, "run_cycle", flaky_cycle)
@@ -266,7 +269,7 @@ def test_run_interval_survives_cycle_failure(env, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert code == 0 and calls["n"] == 2
     assert "サイクル失敗" in out and "再試行します" in out
-    assert "folders/inbox" not in out and "inbo…" in out  # フォルダIDは伏せられる
+    assert folder_id not in out and "1AbC…" in out  # フォルダIDは伏せられる
 
 
 def test_run_once_returns_1_on_cycle_failure(env, capsys, monkeypatch):
@@ -347,6 +350,86 @@ def test_run_stops_with_exit_2_on_auth_error(env, capsys, monkeypatch):
     code = main(["run", "--session", session, "--interval", "1"], client_factory=lambda: FakeDrive())
     out = capsys.readouterr().out
     assert code == 2 and "再認可" in out and "RefreshError" in out
+
+
+def test_run_auth_error_during_discover_stops_with_exit_2(env, capsys, monkeypatch):
+    """自己レビュー:実クライアントではトークン更新失敗はサイクル最初の API(受け箱一覧)で
+    出る。discover の認証エラーも WorkerFatalError → exit 2 になり、無限ループしない。"""
+    gauth = pytest.importorskip("google.auth.exceptions")
+    session = _setup_session(capsys)
+    calls = {"n": 0}
+
+    class RevokedDrive(FakeDrive):
+        def list_files(self, folder_id):
+            calls["n"] += 1
+            raise gauth.RefreshError("invalid_grant: Token has been expired or revoked.")
+
+    monkeypatch.setattr("bio_observer.cli.time.sleep", lambda s: None)
+    code = main(["run", "--session", session, "--interval", "1"],
+                client_factory=lambda: RevokedDrive())
+    out = capsys.readouterr().out
+    assert code == 2 and calls["n"] == 1
+    assert "再認可" in out and "受け箱一覧" in out
+
+
+def test_run_client_init_auth_failure_exits_2(env, capsys):
+    """自己レビュー:クライアント初期化時の再認可要求も exit 2(サイクル中と同じ扱い)。"""
+    gauth = pytest.importorskip("google.auth.exceptions")
+    session = _setup_session(capsys)
+
+    def revoked_factory():
+        raise gauth.RefreshError("invalid_grant: Token has been expired or revoked.")
+
+    code = main(["run", "--session", session, "--once"], client_factory=revoked_factory)
+    out = capsys.readouterr().out
+    assert code == 2 and "初期化に失敗" in out
+    # 一時的なトークンサーバ障害(retryable)は再認可ではなく通常の失敗(exit 1)
+    def outage_factory():
+        raise gauth.RefreshError("temporarily_unavailable", retryable=True)
+
+    assert main(["run", "--session", session, "--once"], client_factory=outage_factory) == 1
+
+
+def test_check_config_and_run_reject_invalid_naive_timezone(env, capsys, monkeypatch):
+    """自己レビュー:BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE の不正値は check-config で NG、run は起動前に拒否。
+    (不正なまま動かすと表記なしの creation_time が全件不採用になり原因を誤認しうる)"""
+    session = _setup_session(capsys)
+    for bad in ("JST", "+9:00", "+0900", "+09:60", "Asia/tokyo"):
+        monkeypatch.setenv("BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE", bad)
+        assert main(["check-config"]) == 1, bad
+        out = capsys.readouterr().out
+        assert "[NG] BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE" in out, bad
+        assert main(["run", "--session", session, "--once"],
+                    client_factory=lambda: FakeDrive()) == 1, bad
+        assert "BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE" in capsys.readouterr().out
+    for good in ("+09:00", "Asia/Tokyo"):
+        monkeypatch.setenv("BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE", good)
+        assert main(["check-config"]) == 0, good
+        assert "[OK] BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE" in capsys.readouterr().out
+
+
+def test_setup_coordinate_guard_allows_direction_labels(env, capsys):
+    """自己レビュー:整数+方位の設置点名(ST-12N 等)は許可し、小数+方位・小数の組・和文DMSは拒否。"""
+    def setup(**kw):
+        args = ["setup", "--project", "P", "--site", kw.get("site", "A"),
+                "--station", kw.get("station", "ST-1"), "--survey-date", "2026-08-01"]
+        if "pos" in kw:
+            args += ["--rounded-position", kw["pos"]]
+        code = main(args)
+        capsys.readouterr()
+        return code
+
+    for station in ("ST-12N", "Pond 3E", "2S", "Block 1W"):
+        assert setup(station=station) == 0, station
+    for site in ("N12.34 E123.45", "12.34,123.45", "岬 12度34分", "12.34N 123.45E"):
+        assert setup(site=site) == 1, site
+    assert setup(pos="5339-23-45") == 0 and setup(pos="53392345") == 0
+
+
+def test_status_limit_must_be_positive(env, capsys):
+    for bad in ("0", "-1"):
+        with pytest.raises(SystemExit):
+            main(["status", "--limit", bad])
 
 
 def test_interval_must_be_positive(env, capsys):

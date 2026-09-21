@@ -455,7 +455,8 @@ def test_non_oserror_exception_is_isolated_per_job(db, seed, storage, cfg, sampl
 
     def download(file_id, dest):
         if file_id == bad:
-            raise FakeHttpError("<HttpError 500 when requesting .../files/%s?alt=media>" % bad)
+            # resp を持たない任意例外(分類は permanent=通常の再試行)。文言中の 500 は分類に使われない
+            raise FakeHttpError("unexpected api failure while requesting .../files/%s" % bad)
         return original_download(file_id, dest)
 
     drive.download_file = download
@@ -639,13 +640,13 @@ def _make_http_error(status: int, reason: str | None = None, uri: str = "https:/
     return errors_mod.HttpError(resp, json.dumps(body).encode(), uri=uri)
 
 
-def test_classify_error_by_concrete_type_and_reason():
-    """T-113再レビュー:分類はモジュール名の一括判定ではなく、具体的な例外型・HTTPステータス・reason で行う。"""
+def test_classify_error_standard_exceptions():
+    """T-113再レビュー:分類はモジュール名の一括判定ではなく、具体的な例外型で行う(標準例外)。"""
     import errno
     import http.client
     import socket
     import ssl
-    from bio_observer.ingest.errors import AUTH, PERMANENT, RATE_LIMITED, TRANSIENT, classify_error
+    from bio_observer.ingest.errors import AUTH, PERMANENT, TRANSIENT, classify_error
 
     # 通信断(具体的な型 / errno)
     for exc in (ConnectionResetError("reset"), TimeoutError("t"), socket.gaierror(8, "dns"),
@@ -659,11 +660,28 @@ def test_classify_error_by_concrete_type_and_reason():
                 FileNotFoundError("missing"), PermissionError("denied"),
                 OSError(errno.ENOSPC, "no space"), OSError("plain")):
         assert classify_error(exc) == PERMANENT, exc
-    # google-auth / httplib2(drive extra があれば実物で確認)
+
+    # HttpError 互換(resp.status)の応答本文が想定外の形でも分類器は落ちない
+    class Resp:
+        status = 403
+
+    class OddHttpError(Exception):
+        resp = Resp()
+        content = b'{"error": {"errors": {"reason": "x"}, "details": "y", "status": 5}}'
+
+    assert classify_error(OddHttpError("<HttpError 403>")) == PERMANENT
+
+
+def test_classify_error_google_library_exceptions():
+    """T-113再レビュー:google-auth / httplib2 / HttpError の実物で分類表を確認(drive extra 必要)。"""
+    from bio_observer.ingest.errors import AUTH, PERMANENT, RATE_LIMITED, TRANSIENT, classify_error
     gauth = pytest.importorskip("google.auth.exceptions")
     httplib2 = pytest.importorskip("httplib2")
     assert classify_error(gauth.RefreshError("invalid_grant: Token has been expired or revoked")) == AUTH
     assert classify_error(gauth.DefaultCredentialsError("no creds")) == AUTH
+    # トークンサーバ側の一時障害(500/503・temporarily_unavailable)は retryable=True で返る:
+    # 再認可を誤案内してワーカーを止めず、通信断として待つ
+    assert classify_error(gauth.RefreshError("temporarily_unavailable", retryable=True)) == TRANSIENT
     assert classify_error(gauth.TransportError("connection aborted")) == TRANSIENT
     assert classify_error(httplib2.ServerNotFoundError("Unable to find the server")) == TRANSIENT
     # HttpError:ステータス+reason
@@ -755,9 +773,16 @@ class _RealisticFolderDrive(FakeDrive):
 
     def upload_file(self, folder_id, source, name):
         if self.fail_upload:
-            raise _make_http_error(
-                500, "backendError",
-                uri=f"https://www.googleapis.com/upload/drive/v3/files?parents={folder_id}")
+            # HttpError 互換の形(resp.status=500)。drive extra なしでも検証できるよう実物は使わない
+            class Resp:
+                status = 500
+
+            class FakeHttpError(Exception):
+                resp = Resp()
+
+            raise FakeHttpError(
+                "<HttpError 500 when requesting https://www.googleapis.com/upload/drive/v3/files"
+                f"?parents={folder_id} returned 'Backend Error'>")
         return super().upload_file(folder_id, source, name)
 
 
@@ -784,6 +809,75 @@ def test_result_folder_ids_learned_at_runtime_are_masked(db, seed, storage, samp
     drive.fail_upload = False
     summary = run_cycle(db, drive, cfg2, storage, seed["session"])
     assert summary.completed == 1
+
+
+def test_auth_error_during_discover_becomes_fatal(db, seed, storage, cfg, sample_bytes):
+    """自己レビュー:受け箱一覧(discover)での認証エラーも WorkerFatalError(サイクル最初の API で
+    トークン更新失敗が出るため)。通信断はそのまま伝播し CLI が次回再試行する。"""
+    import ssl
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_disc.MOV", sample_bytes)
+    drive.list_files = lambda folder_id: (_ for _ in ()).throw(
+        ssl.SSLCertVerificationError(1, "certificate verify failed"))
+    with pytest.raises(worker.WorkerFatalError, match="受け箱一覧"):
+        run_cycle(db, drive, cfg, storage, seed["session"])
+    drive.list_files = lambda folder_id: (_ for _ in ()).throw(ConnectionResetError("reset"))
+    with pytest.raises(ConnectionResetError):
+        run_cycle(db, drive, cfg, storage, seed["session"])
+    assert db.execute("SELECT COUNT(*) FROM ingest_job").fetchone()[0] == 0  # 副作用なし
+
+
+def test_future_observed_at_is_reinitialized(db, seed, storage, sample_bytes):
+    """自己レビュー:観測時刻が未来(PC時計のずれ)だと間隔判定が永久に成立しないため初期化する。"""
+    cfg60 = DriveIngestConfig(inbox_folder_id="inbox", results_parent_folder_id="inbox",
+                              max_retries=2, stability_confirmations=2,
+                              stability_interval_seconds=60)
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_future.MOV", sample_bytes)
+    run_cycle(db, drive, cfg60, storage, seed["session"])
+    job_id = db.execute("SELECT id FROM ingest_job").fetchone()["id"]
+    probe = json.loads(_job(db, job_id)["stable_probe_json"])
+    probe["observed_at"] = "2099-01-01T00:00:00Z"
+    db.execute("UPDATE ingest_job SET stable_probe_json = ? WHERE id = ?",
+               (json.dumps(probe), job_id))
+    db.commit()
+    run_cycle(db, drive, cfg60, storage, seed["session"])
+    probe = json.loads(_job(db, job_id)["stable_probe_json"])
+    assert probe["confirmations"] == 1 and probe["observed_at"] < "2099"
+    messages = [r[0] for r in db.execute(
+        "SELECT message FROM ingest_event WHERE ingest_job_id = ? ORDER BY rowid", (job_id,))]
+    assert any(m and "未来" in m for m in messages)
+
+
+def test_error_is_cleared_on_completion(db, seed, storage, cfg, sample_bytes):
+    """自己レビュー:復旧して完了した行に旧エラーを残さない(履歴は IngestEvent に残る)。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_clear.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    original_info = drive.get_file_info
+    drive.get_file_info = lambda fid: (_ for _ in ()).throw(ConnectionResetError("network down"))
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    assert "network down" in db.execute("SELECT error FROM ingest_job").fetchone()[0]
+    drive.get_file_info = original_info
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT status, error FROM ingest_job").fetchone()
+    assert summary.completed == 1 and tuple(job) == ("completed", None)
+    assert any("network down" in (r[0] or "") for r in
+               db.execute("SELECT message FROM ingest_event"))
+
+
+def test_short_or_alias_folder_ids_are_not_redacted(db, seed, storage, cfg, sample_bytes):
+    """自己レビュー:"root"(マイドライブ別名)や "inbox" のような短い設定値は置換対象にしない
+    (パス・無関係な文言を壊さない)。実 Drive ID(25文字以上)は従来どおり伏せる。"""
+    cfg_root = DriveIngestConfig(inbox_folder_id="root", results_parent_folder_id="root")
+    text = "OSError: /data/root/ingest_tmp/x.mov (results_root)"
+    assert worker.redact_secrets(text, worker.all_secrets(cfg_root)) == text
+    long_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456"
+    cfg_long = DriveIngestConfig(inbox_folder_id=long_id, results_parent_folder_id="root")
+    assert long_id not in worker.redact_secrets(f"q='{long_id}' in parents",
+                                                worker.all_secrets(cfg_long))
+    worker.remember_secret("gfold01")  # 短い取得値も登録されない
+    assert "gfold01" not in worker.all_secrets(cfg_root)
 
 
 def test_ingest_event_append_only(db, seed, cfg):

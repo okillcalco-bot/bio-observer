@@ -12,6 +12,15 @@ from bio_observer.db import connect, migrate
 from bio_observer.db.ids import new_id, utc_now_iso
 
 
+@pytest.fixture(autouse=True)
+def _reset_learned_secrets():
+    """ワーカーがプロセス内に保持する伏せ字対象(取得フォルダID)をテスト間で持ち越さない。"""
+    from bio_observer.ingest import worker
+    worker.reset_learned_secrets()
+    yield
+    worker.reset_learned_secrets()
+
+
 @pytest.fixture()
 def db(tmp_path) -> sqlite3.Connection:
     """一時ファイル上に最新スキーマを構築した接続を返す。"""

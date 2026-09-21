@@ -29,7 +29,7 @@ from pathlib import Path
 from bio_observer.config import StorageConfig
 from bio_observer.db.ids import new_id, utc_now_iso
 from bio_observer.ingest import errors as ingest_errors
-from bio_observer.ingest.drive import DriveClient, DriveFileInfo, DriveIngestConfig
+from bio_observer.ingest.drive import DriveClient, DriveIngestConfig
 from bio_observer.media_registry import (
     SUPPORTED_EXTENSIONS,
     DuplicateMediaError,
@@ -51,6 +51,11 @@ def mask_secret(value: str) -> str:
     return f"{value[:4]}…(設定済み)" if len(value) > 4 else "(設定済み)"
 
 
+# 文言中の置換対象とする秘密情報の最小長。Drive のフォルダ・ファイルIDは25文字以上で、
+# "root"(マイドライブ直下の別名)や "inbox" 等の短い一般語を置換対象にすると、パスや
+# 無関係な文言まで壊れるため(表示側の mask_secret は長さを問わず使える)
+MIN_REDACT_LENGTH = 8
+
 # 処理中に Drive から取得したフォルダID(results/ と results/<job_id>/)。設定値ではないが
 # アクセス経路になり得るため、例外文言へ現れたら設定値と同様に伏せる(プロセス内で保持)
 _LEARNED_SECRETS: set[str] = set()
@@ -58,15 +63,21 @@ _LEARNED_SECRETS: set[str] = set()
 
 def remember_secret(value: str | None) -> None:
     """実行中に判明したフォルダID等を伏せ字対象へ登録する。"""
-    if value and len(value) > 4:
+    if value and len(value) >= MIN_REDACT_LENGTH:
         _LEARNED_SECRETS.add(value)
+
+
+def reset_learned_secrets() -> None:
+    """処理中に登録した伏せ字対象を破棄する(テスト・別設定での再利用向け)。"""
+    _LEARNED_SECRETS.clear()
 
 
 def config_secrets(cfg: DriveIngestConfig | None) -> tuple[str, ...]:
     """DB・イベント・表示へ出してはいけない設定値(Driveフォルダ ID。SECURITY.md)。"""
     if cfg is None:
         return ()
-    return tuple(v for v in {cfg.inbox_folder_id, cfg.results_parent_folder_id} if v)
+    return tuple(v for v in {cfg.inbox_folder_id, cfg.results_parent_folder_id}
+                 if v and len(v) >= MIN_REDACT_LENGTH)
 
 
 def all_secrets(cfg: DriveIngestConfig | None) -> tuple[str, ...]:
@@ -90,7 +101,19 @@ def redact_secrets(text: str | None, secrets) -> str | None:
 
 
 def _describe_error(exc: BaseException, cfg: DriveIngestConfig) -> str:
-    return redact_secrets(f"{type(exc).__name__}: {exc}", all_secrets(cfg))
+    try:
+        text = f"{type(exc).__name__}: {exc}"
+    except Exception:  # noqa: BLE001 — __str__ が壊れた例外でもジョブ隔離を守る
+        text = f"{type(exc).__name__}: (文言を取得できません)"
+    return redact_secrets(text, all_secrets(cfg))
+
+
+def _classify(exc: BaseException) -> str:
+    """例外分類。分類器自体の失敗で except ハンドラを壊さない(permanent 扱い)。"""
+    try:
+        return ingest_errors.classify_error(exc)
+    except Exception:  # noqa: BLE001
+        return ingest_errors.PERMANENT
 
 
 @dataclass
@@ -231,20 +254,24 @@ def _check_upload_stable(conn: sqlite3.Connection, client: DriveClient,
             and probe.get("modified") == info.modified_time)
     prev_observed = _parse_probe_time(probe.get("observed_at"))
     prev_confirmations = probe.get("confirmations")
+    elapsed = (_parse_iso(now) - prev_observed).total_seconds() if prev_observed else None
     if probe and (prev_observed is None or not isinstance(prev_confirmations, int)
                   or isinstance(prev_confirmations, bool) or prev_confirmations < 1):
         # 観測情報が壊れている(observed_at 不正・confirmations 非整数等):
         # 例外にせず初期化して数え直す(内部データ異常で永久待機・失敗にしない)
         repair = repair or "観測情報(observed_at / confirmations)が不正のため初期化"
         same = False
+    elif probe and elapsed is not None and elapsed < 0:
+        # 観測時刻が未来(PC時計のずれ等)だと間隔判定が永久に成立しない
+        repair = repair or "観測時刻(observed_at)が未来のため初期化"
+        same = False
     if repair:
         _transition(conn, job["id"], "waiting_for_upload",
                     message=f"観測情報を初期化して再確認: {repair}")
-    if not same:
+    if not same or prev_observed is None:
         confirmations = 1
         observed_at = now  # 変化を観測(または基準なし):基準時刻を更新して数え直し
     else:
-        elapsed = (_parse_iso(now) - prev_observed).total_seconds()
         if elapsed >= cfg.stability_interval_seconds:
             confirmations = prev_confirmations + 1
             observed_at = now
@@ -454,7 +481,8 @@ def process_pending(conn: sqlite3.Connection, client: DriveClient,
             if status == "uploading_results":
                 job = _reload(conn, job_id)
                 _upload_results(conn, client, cfg, storage, job)
-                _transition(conn, job_id, "completed", message="結果返却完了")
+                # 完了時は復旧前の最終エラーを消す(履歴は IngestEvent に残る)
+                _transition(conn, job_id, "completed", message="結果返却完了", error=None)
                 summary.completed += 1
         except Exception as exc:  # noqa: BLE001 — ジョブ単位で隔離(KeyboardInterruptは通す)
             # Drive API(HttpError等)・I/O・DB・登録エラーのいずれも、他ジョブと
@@ -462,7 +490,7 @@ def process_pending(conn: sqlite3.Connection, client: DriveClient,
             # 保存する文言はフォルダID等を伏せる(HttpErrorはURLにフォルダIDを含む)
             job = _reload(conn, job_id)
             error = _describe_error(exc, cfg)
-            category = ingest_errors.classify_error(exc)
+            category = _classify(exc)
             label = ingest_errors.CATEGORY_LABELS[category]
             resume = job["status"] if job["status"] in RETRYABLE_STATUSES else "waiting_for_upload"
             if category == ingest_errors.AUTH:
@@ -497,8 +525,23 @@ def process_pending(conn: sqlite3.Connection, client: DriveClient,
 def run_cycle(conn: sqlite3.Connection, client: DriveClient, cfg: DriveIngestConfig,
               storage: StorageConfig, survey_session_id: str,
               analysis_hook=None) -> CycleSummary:
-    """1サイクル:受け箱の発見+未完了ジョブの処理。定期実行のエントリポイント。"""
-    created = discover(conn, client, cfg, survey_session_id)
+    """1サイクル:受け箱の発見+未完了ジョブの処理。定期実行のエントリポイント。
+
+    受け箱一覧(discover)はサイクル最初の API 呼び出しであり、実クライアントでは
+    期限切れトークンの更新失敗(RefreshError)がここで出る。ジョブ処理と同じ分類で
+    認証・設定エラーは WorkerFatalError に変換し、CLI が exit 2 で案内できるようにする。
+    通信断・レート制限・その他はそのまま伝播し、CLI は「サイクル失敗」として次回再試行する。
+    """
+    try:
+        created = discover(conn, client, cfg, survey_session_id)
+    except WorkerFatalError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if _classify(exc) == ingest_errors.AUTH:
+            label = ingest_errors.CATEGORY_LABELS[ingest_errors.AUTH]
+            raise WorkerFatalError(
+                f"{label}: {_describe_error(exc, cfg)}(受け箱一覧の取得時)") from exc
+        raise
     summary = process_pending(conn, client, cfg, storage, analysis_hook=analysis_hook)
     summary.discovered = len(created)
     return summary

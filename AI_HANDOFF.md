@@ -1,13 +1,13 @@
 # AI引き継ぎ(AI_HANDOFF.md)
 
-- 最終更新:2026-09-05/更新者:Claude Code(T-113)
+- 最終更新:2026-09-21/更新者:Claude Code(T-113 自己レビュー第1周)
 - Claude Code・Codexは作業開始前に PROJECT_CHARTER.md・本文書・TASKS.md を確認し、作業終了時に本文書と TASKS.md を更新すること。
 
 ---
 
 ## 現在の状態
 
-フェーズ1(音声パイプライン)。基盤(設計→DB→メディア登録→Drive取込→CLI)はmain 89b8050までマージ済み(T-111 PR #11、Issue #10クローズ)。T-112(撮影開始時刻の根拠優先順位)を実装完了し、Codexレビュー待ち(Issue #12、PR #13、ブランチ claude/t112-recording-time-basis)。その上にT-113(取込ワーカー・CLIの堅牢性修正。Issue #14、ブランチ claude/t113-ingest-robustness、base=T-112ブランチ)を積み、Codexレビュー待ち。Windows解析PCでの短尺2本の実Drive E2E(docs/WINDOWS_E2E.md)は利用者が実施中。音声抽出(T-102)・BirdNET/SED(T-103)・映像検出・UIは未実装。
+フェーズ1(音声パイプライン)。基盤(設計→DB→メディア登録→Drive取込→CLI)はmain 89b8050までマージ済み(T-111 PR #11、Issue #10クローズ)。T-112(撮影開始時刻の根拠優先順位。Issue #12、PR #13、ブランチ claude/t112-recording-time-basis)と、その上に積んだT-113(取込ワーカー・CLIの堅牢性修正。Issue #14、PR #15、ブランチ claude/t113-ingest-robustness、base=T-112ブランチ)はいずれもレビュー対応済みでオープン。**Codexレビューは当面見込めない**(利用者の指示)ため、Claude Code が独立3観点(ワーカー/CLI・時刻/文書・テスト・秘匿)の再現ベース自己レビューを周回し、再現した問題のみ修正している(D-29 追記参照)。マージは調査責任者の判断。Windows解析PCでの短尺2本の実Drive E2E(docs/WINDOWS_E2E.md)は利用者が実施中。音声抽出(T-102)・BirdNET/SED(T-103)・映像検出・UIは未実装。
 
 ## T-113実装の要点(レビュー観点。D-29)
 
@@ -16,8 +16,9 @@
 - `cli.py`:run の Drive クライアント初期化失敗を1行案内+exit 1。1サイクルの失敗で常駐を終了せず次 interval で再試行(--once は exit 1)。例外文言中のフォルダIDを `_redact` でマスク。setup は正確座標に見える入力(小数3桁以上・度記号・方位付き数値)をDB接続前に拒否(D-12)
 - `media_registry.py`:呼び出し側指定の recording_started_at をコピー前に parse_timestamp で検証・UTC正規化(表記なし・解釈不能は ValueError、+09:00 は Z へ正規化)。自動推定経路(T-112)は無変更
 - テスト8件:任意例外のジョブ隔離/完了待ち失敗が再試行を消費しない+回復後完了/observed_at 欠落許容/初期化失敗の案内/常駐のサイクル失敗継続+フォルダIDマスク/--once の exit 1/座標様入力の拒否と整数メッシュ許可/呼び出し側時刻の早期検証と正規化
-- **Codexレビュー対応(2026-09-06)**:(1) 伏せ字を保存経路へ拡大:`worker.redact_secrets` / `config_secrets` / `mask_secret` を共通規則とし、ingest_job.error・IngestEvent へ保存する前に適用。CLI `_mask`・`_redact` は同関数へ委譲、status は保存済み値にも表示前に適用(環境変数からフォルダIDを取得)。(2) `_is_transient_error` で通信断(OSError系・HTTP 5xx/429・通信ライブラリ由来)とデータ異常(ValueError等・HTTP 4xx)を分離。待機継続は前者のみ、後者は再試行消費→failed。(3) `_load_probe` / `_parse_probe_time` で壊れた観測情報を初期化して再確認(IngestEvent に理由)。テスト5件(9ケース)追加(保存文言の漏えい検査/データ異常の再試行消費/HTTPステータスによる区別/壊れたprobe 5パターン/status の保存済み値マスク)
+- **Codexレビュー対応(2026-09-06)**:(1) 伏せ字を保存経路へ拡大:`worker.redact_secrets` / `config_secrets` / `mask_secret` を共通規則とし、ingest_job.error・IngestEvent へ保存する前に適用。CLI `_mask`・`_redact` は同関数へ委譲、status は保存済み値にも表示前に適用(環境変数からフォルダIDを取得)。(2) `_is_transient_error`(4a61ed9 で ingest/errors.py の classify_error に置換・廃止)で通信断(OSError系・HTTP 5xx/429・通信ライブラリ由来)とデータ異常(ValueError等・HTTP 4xx)を分離。待機継続は前者のみ、後者は再試行消費→failed。(3) `_load_probe` / `_parse_probe_time` で壊れた観測情報を初期化して再確認(IngestEvent に理由)。テスト5件(9ケース)追加(保存文言の漏えい検査/データ異常の再試行消費/HTTPステータスによる区別/壊れたprobe 5パターン/status の保存済み値マスク)
 - **Codex再レビュー対応(2026-09-06、c2318e0 への指摘3件)**:(1) `ingest/errors.py` 新設。`classify_error` が具体的な例外型・HTTPステータス・reason で transient / rate_limited / auth / permanent を返す(モジュール名リストは廃止)。(2) transient・rate_limited は全段階で再試行回数を消費せず retry_required(同じ段階)→制限解除・復旧後に自動再開。auth は `WorkerFatalError` でサイクル停止、CLI run は exit 2 で案内。(3) `remember_secret` で処理中に取得した results/ フォルダIDも伏せ字対象へ登録(`all_secrets`)。dry-run も例外を伏せ字で案内。テスト6件追加(分類表=実物の RefreshError / TransportError / ServerNotFoundError / HttpError 403+reason・401・429・5xx、レート制限の非消費と再開、認証エラーでの停止と再開、結果フォルダIDの伏せ字、dry-run 伏せ字、exit 2)。**テスト実行には drive extra(`pip install ".[drive]"`)が必要**(未導入では該当部分を skip)
+- **自己レビュー第1周(2026-09-21、Codexレビューが当面見込めないため)**:独立3観点のレビューで再現した問題を修正。(高)受け箱一覧での認証エラーが exit 2 に到達せず無限ループ → `run_cycle` で discover の例外も分類し auth は `WorkerFatalError`。クライアント初期化時の auth 失敗も exit 2。(中)`RefreshError(retryable=True)` を auth 扱いしていた → transient。未来の observed_at で永久待機 → 初期化。`BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE` の不正値が無検査 → check-config NG・run 拒否。座標ガードが「ST-12N」等を誤拒否 → 小数必須に。(低)分類器の頑健化、完了時 error クリア、伏せ字の最小長 8、parse_timestamp の日付のみ拒否、オフセット範囲検査、basis/certainty の早期検証、ffprobe 不在の ProbeError 化、status --limit、inspect-time 表示、README/E2E/.gitignore/CHANGELOG/D-29 の整合。テスト13件追加(全129件)
 
 ## T-112実装の要点(レビュー観点)
 
@@ -76,7 +77,7 @@
 
 ## 未完了のこと
 
-- T-112 PR #13・T-113 PR のCodexレビュー・マージ(T-113はT-112の上に積んでいるため、T-112マージ後にT-113のbaseをmainへ切り替えてマージ)
+- T-112 PR #13・T-113 PR #15 のレビュー・マージ(Codexレビューは当面予定なし。調査責任者が直接判断するか、レビュー再開まで保留。T-113はT-112の上に積んでいるため、T-112マージ後にT-113のbaseをmainへ切り替えてマージ)
 - T-110実機E2Eスモークテスト(Windows解析PC。docs/WINDOWS_E2E.md の手順・チェックリスト)
 - T-102以降(音声抽出、BirdNET/SED、クリップ生成、UI、CSV出力)
 - リモート環境からのマージ済みブランチ削除(ref削除権限403。GitHub上で手動削除)
@@ -91,8 +92,8 @@
 ## 次に行うべきこと
 
 1. 利用者:Windows解析PCでの短尺2本の実機E2E(docs/WINDOWS_E2E.md のチェックリスト8項目+観察項目)。**VERIFICATION_T112.md 第2節の実測はマージ後の追記でも可だが、常駐ワーカーへの反映・T-102接続前に必ず実施する**(登録せずに確認できる `bio-observer inspect-time` は環境のあるMacでも実行可。Codex判断)
-2. Codex:T-112 PR #13 のレビュー(優先順位・確実性ポリシー維持・TZ解釈・スキーマ無変更の確認)、T-113 PR のレビュー(例外隔離・再試行ポリシー・入力検証・スキーマ無変更の確認)
-3. 調査責任者:E2E成功後にT-112 PR #13 → T-113 PR の順でマージ → Claude CodeがT-102 音声抽出へ着手(基準時刻を先に確定してから解析へ進む)
+2. レビュー(Codex または調査責任者):PR #13(優先順位・確実性ポリシー維持・TZ解釈・スキーマ無変更の確認)、PR #15(例外分類・再試行ポリシー・秘匿・入力検証・スキーマ無変更の確認)。Codexが来るまでは Claude Code の自己レビュー周回を継続(次周は前周の修正部分と、実 Drive クライアント経路=GoogleDriveClient のリフレッシュ・ダウンロード再開を重点)
+3. 調査責任者:E2E成功後にT-112 PR #13 → T-113 PR #15 の順でマージ → Claude CodeがT-102 音声抽出へ着手(基準時刻を先に確定してから解析へ進む)
 
 ## T-101実装の要点(レビュー観点)
 
@@ -121,7 +122,7 @@
 
 ## 実行したテスト/テスト結果
 
-- `pytest`:116件すべてパス(環境確認7件+DB27件+メディア登録29件+Drive取込31件+CLI22件。パラメータ化テストを個別に数える。drive extra 導入環境)。合成メディア・一時DB・Fake Driveのみ(本番DB・実Driveへは書き込まない)
+- `pytest`:129件すべてパス(環境確認7件+DB27件+メディア登録32件+Drive取込36件+CLI27件。パラメータ化テストを個別に数える。drive extra 導入環境)。drive extra なしでは 124 passed / 5 skipped。pyflakes クリーン。合成メディア・一時DB・Fake Driveのみ(本番DB・実Driveへは書き込まない)
 - DBテスト内訳:空DBへの最新スキーマ構築/1バージョンずつの段階的マイグレーション/再実行の冪等性/外部キー有効化・integrity_check/正確座標列の不存在検査/不透明IDポリシー/UTCヘルパー/FK違反拒否/一意制約/enum CHECK拒否/SED由来・種候補なしAudioDetection保存/統合後の生スコア保持/ReferenceObservation精査情報+二重確認CHECK/review追記専用/analysis_run完了後凍結/run_event・access_log追記専用/DetectionLink確定に人の記録必須
 - `bio-observer-envcheck`:すべてOK(Python 3.11.15 / ffmpeg 6.1.1 / ffprobe 6.1.1 / 設定読み込み)
 - ライブラリ比較:birdnet 0.2.16・birdnet-analyzer 2.4.0のインストール・API検証(詳細はD-22)。推論は未実施(T-103申し送り)
@@ -135,7 +136,7 @@
 
 - 設計:PR #1/T-003:PR #3/T-004:PR #5/T-101:PR #8/T-110:PR #9(main: a993260)
 - T-111:PR #11(main: 89b8050)
-- T-112:PR #13(ブランチ claude/t112-recording-time-basis、Issue #12)/T-113:ブランチ claude/t113-ingest-robustness(Issue #14、base=T-112ブランチ)
+- T-112:PR #13(ブランチ claude/t112-recording-time-basis、Issue #12)/T-113:PR #15(ブランチ claude/t113-ingest-robustness、Issue #14、base=T-112ブランチ)
 
 ## 変更してはいけない事項
 

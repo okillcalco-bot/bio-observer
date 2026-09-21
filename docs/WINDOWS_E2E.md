@@ -56,6 +56,9 @@ bio-observer run --session ses_xxxx --once
 
 # または継続実行(既定300秒間隔。Ctrl+Cで安全に停止=状態はDB保存済み)
 bio-observer run --session ses_xxxx --interval 300
+# 終了コード 2 で止まった場合は認証・設定エラー(トークン失効・証明書・プロキシ)。
+# token.json を削除して再認可するか設定を直し、再度 run すると未完了ジョブから再開する。
+# 通信断・レート制限では止まらず次の間隔で自動再試行する
 
 # 状態確認
 bio-observer status
