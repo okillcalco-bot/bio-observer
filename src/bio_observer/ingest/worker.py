@@ -28,16 +28,96 @@ from pathlib import Path
 
 from bio_observer.config import StorageConfig
 from bio_observer.db.ids import new_id, utc_now_iso
-from bio_observer.ingest.drive import DriveClient, DriveFileInfo, DriveIngestConfig
+from bio_observer.ingest import errors as ingest_errors
+from bio_observer.ingest.drive import DriveClient, DriveIngestConfig
 from bio_observer.media_registry import (
     SUPPORTED_EXTENSIONS,
     DuplicateMediaError,
-    MediaRegistrationError,
     register_media,
 )
 
 RETRYABLE_STATUSES = ("waiting_for_upload", "downloading", "downloaded",
                       "registered", "queued", "analyzing", "uploading_results")
+
+class WorkerFatalError(RuntimeError):
+    """認証・設定エラーなど人の対応が必要な失敗。サイクルを止めて呼び出し側へ案内する。
+
+    ジョブの再試行回数は消費しない(ジョブ側の問題ではない)。原因は errors.classify_error。
+    """
+
+
+class SourceRemovedError(Exception):
+    """発見後に受け箱から取り消された(ゴミ箱へ移動された)ファイル。再試行せず failed にする。"""
+
+
+def mask_secret(value: str) -> str:
+    """フォルダID等の秘密情報を先頭4文字だけ残して伏せる(表示・保存の共通規則)。"""
+    return f"{value[:4]}…(設定済み)" if len(value) > 4 else "(設定済み)"
+
+
+# 文言中の置換対象とする秘密情報の最小長。Drive のフォルダ・ファイルIDは25文字以上で、
+# "root"(マイドライブ直下の別名)や "inbox" 等の短い一般語を置換対象にすると、パスや
+# 無関係な文言まで壊れるため(表示側の mask_secret は長さを問わず使える)
+MIN_REDACT_LENGTH = 8
+
+# 処理中に Drive から取得したフォルダID(results/ と results/<job_id>/)。設定値ではないが
+# アクセス経路になり得るため、例外文言へ現れたら設定値と同様に伏せる(プロセス内で保持)
+_LEARNED_SECRETS: set[str] = set()
+
+
+def remember_secret(value: str | None) -> None:
+    """実行中に判明したフォルダID等を伏せ字対象へ登録する。"""
+    if value and len(value) >= MIN_REDACT_LENGTH:
+        _LEARNED_SECRETS.add(value)
+
+
+def reset_learned_secrets() -> None:
+    """処理中に登録した伏せ字対象を破棄する(テスト・別設定での再利用向け)。"""
+    _LEARNED_SECRETS.clear()
+
+
+def config_secrets(cfg: DriveIngestConfig | None) -> tuple[str, ...]:
+    """DB・イベント・表示へ出してはいけない設定値(Driveフォルダ ID。SECURITY.md)。"""
+    if cfg is None:
+        return ()
+    return tuple(v for v in {cfg.inbox_folder_id, cfg.results_parent_folder_id}
+                 if v and len(v) >= MIN_REDACT_LENGTH)
+
+
+def all_secrets(cfg: DriveIngestConfig | None) -> tuple[str, ...]:
+    """設定値+処理中に取得したフォルダID(長いものから置換して部分一致の取りこぼしを防ぐ)。"""
+    return tuple(sorted(set(config_secrets(cfg)) | _LEARNED_SECRETS, key=len, reverse=True))
+
+
+def redact_secrets(text: str | None, secrets) -> str | None:
+    """文言に含まれる秘密情報(フォルダID等)を伏せる。
+
+    Drive API の HttpError はリクエストURLにフォルダIDを含むため、例外文言を
+    ingest_job.error / ingest_event へ保存する前、および status で表示する前に
+    必ず通す(T-113。保存経路と表示経路の両方で同じ規則を使う)。
+    """
+    if not text:
+        return text
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, mask_secret(secret))
+    return text
+
+
+def _describe_error(exc: BaseException, cfg: DriveIngestConfig) -> str:
+    try:
+        text = f"{type(exc).__name__}: {exc}"
+    except Exception:  # noqa: BLE001 — __str__ が壊れた例外でもジョブ隔離を守る
+        text = f"{type(exc).__name__}: (文言を取得できません)"
+    return redact_secrets(text, all_secrets(cfg))
+
+
+def _classify(exc: BaseException) -> str:
+    """例外分類。分類器自体の失敗で except ハンドラを壊さない(permanent 扱い)。"""
+    try:
+        return ingest_errors.classify_error(exc)
+    except Exception:  # noqa: BLE001
+        return ingest_errors.PERMANENT
 
 
 @dataclass
@@ -99,6 +179,22 @@ def _job_ext(job: sqlite3.Row) -> str:
     return Path(job["original_file_name"] or "").suffix.lower()
 
 
+def _tmp_paths(storage: StorageConfig, job: sqlite3.Row) -> tuple[Path, Path]:
+    """一時領域の (確定名, .part) パス。"""
+    base = _tmp_dir(storage) / f"{job['id']}{_job_ext(job)}"
+    return base, base.with_name(base.name + ".part")
+
+
+def _discard_tmp(storage: StorageConfig, job: sqlite3.Row) -> None:
+    """このジョブの一時DLファイルを冪等に削除する(originals/ の確定ファイルには触れない)。
+
+    登録決着後・完了時・failed 到達時に呼び、遷移とunlinkの間のクラッシュや
+    再試行上限による孤児ファイル(4時間動画=数GB)を残さない(T-113 自己レビュー第2周)。
+    """
+    for path in _tmp_paths(storage, job):
+        path.unlink(missing_ok=True)
+
+
 def discover(conn: sqlite3.Connection, client: DriveClient, cfg: DriveIngestConfig,
              survey_session_id: str) -> list[str]:
     """受け箱を確認し、未処理の対応形式ファイルをingest_jobとして登録する。"""
@@ -134,6 +230,35 @@ def _parse_iso(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _parse_probe_time(value) -> datetime | None:
+    """観測時刻を解釈する。不正(非文字列・形式不正・naive)は None(=初期化対象)。"""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = _parse_iso(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _load_probe(job: sqlite3.Row) -> tuple[dict, str | None]:
+    """stable_probe_json を読む。壊れたJSON・想定外の形式は空の観測情報+理由を返す。
+
+    観測情報(size / modified / confirmations / observed_at)はワーカーが再確認で
+    作り直せる修復可能な情報なので、異常時は例外にせず初期化して数え直す(T-113)。
+    """
+    raw = job["stable_probe_json"]
+    if not raw:
+        return {}, None
+    try:
+        probe = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}, "stable_probe_json を解釈できないため初期化"
+    if not isinstance(probe, dict):
+        return {}, "stable_probe_json が想定形式でないため初期化"
+    return probe, None
+
+
 def _check_upload_stable(conn: sqlite3.Connection, client: DriveClient,
                          cfg: DriveIngestConfig, job: sqlite3.Row) -> bool:
     """サイズ・modifiedTimeが「最小時間間隔を空けた」連続確認で不変ならTrue。
@@ -143,21 +268,38 @@ def _check_upload_stable(conn: sqlite3.Connection, client: DriveClient,
     ダウンロードへ進まない(4時間動画の途中取得防止)。
     """
     info = client.get_file_info(job["drive_file_id"])
-    probe = json.loads(job["stable_probe_json"] or "{}")
+    if info.trashed:
+        raise SourceRemovedError("発見後に受け箱から取り消された(ゴミ箱)ため取込を中止")
+    probe, repair = _load_probe(job)
     now = utc_now_iso()
     same = (probe.get("size") == info.size_bytes
             and probe.get("modified") == info.modified_time)
-    if not same:
+    prev_observed = _parse_probe_time(probe.get("observed_at"))
+    prev_confirmations = probe.get("confirmations")
+    elapsed = (_parse_iso(now) - prev_observed).total_seconds() if prev_observed else None
+    if probe and (prev_observed is None or not isinstance(prev_confirmations, int)
+                  or isinstance(prev_confirmations, bool) or prev_confirmations < 1):
+        # 観測情報が壊れている(observed_at 不正・confirmations 非整数等):
+        # 例外にせず初期化して数え直す(内部データ異常で永久待機・失敗にしない)
+        repair = repair or "観測情報(observed_at / confirmations)が不正のため初期化"
+        same = False
+    elif probe and elapsed is not None and elapsed < 0:
+        # 観測時刻が未来(PC時計のずれ等)だと間隔判定が永久に成立しない
+        repair = repair or "観測時刻(observed_at)が未来のため初期化"
+        same = False
+    if repair:
+        _transition(conn, job["id"], "waiting_for_upload",
+                    message=f"観測情報を初期化して再確認: {repair}")
+    if not same or prev_observed is None:
         confirmations = 1
-        observed_at = now  # 変化を観測:基準時刻を更新して数え直し
+        observed_at = now  # 変化を観測(または基準なし):基準時刻を更新して数え直し
     else:
-        elapsed = (_parse_iso(now) - _parse_iso(probe["observed_at"])).total_seconds()
         if elapsed >= cfg.stability_interval_seconds:
-            confirmations = probe.get("confirmations", 1) + 1
+            confirmations = prev_confirmations + 1
             observed_at = now
         else:
             # 間隔不足:確認回数・基準時刻を進めない
-            confirmations = probe.get("confirmations", 1)
+            confirmations = prev_confirmations
             observed_at = probe["observed_at"]
     conn.execute(
         "UPDATE ingest_job SET stable_probe_json = ?, size_bytes = ?, modified_time = ?, "
@@ -201,6 +343,19 @@ def _register(conn: sqlite3.Connection, storage: StorageConfig,
     それ以外の例外(一時的なprobe失敗等)ではファイルを保持したまま伝播し、
     再試行でダウンロード済みファイルを再利用できるようにする。
     """
+    # 再開時:register_media の commit 直後〜registered 遷移前にクラッシュしていた場合は、
+    # 自ジョブが作成した資産(note で識別)を採用する。従来は原本を再コピー→sha256 重複→
+    # 「自分の資産の重複」として完了し、系譜と候補評価記録が食い違っていた(自己レビュー第2周)
+    own = conn.execute("SELECT id, sha256 FROM media_asset WHERE note = ? AND deleted_at IS NULL",
+                       (f"ingest:{job['id']}",)).fetchone()
+    if own:
+        _transition(conn, job["id"], "registered",
+                    message="再開: クラッシュ前に登録済みの資産を採用"
+                            "(候補評価記録は登録時に保存されなかったため media_asset の値のみ)",
+                    detail={"sha256": own["sha256"], "resumed": True},
+                    media_asset_id=own["id"])
+        _discard_tmp(storage, job)
+        return
     try:
         result = register_media(
             conn, downloaded, job["survey_session_id"], storage=storage,
@@ -216,7 +371,7 @@ def _register(conn: sqlite3.Connection, storage: StorageConfig,
         _transition(conn, job["id"], "uploading_results",
                     message=f"同一原本が登録済みのためスキップ: {exc.existing_id}",
                     duplicate_of_media_asset_id=exc.existing_id)
-        downloaded.unlink(missing_ok=True)
+        _discard_tmp(storage, job)
         return
     _transition(conn, job["id"], "registered", message="MediaAsset登録完了",
                 detail={"sha256": result.sha256,
@@ -227,7 +382,31 @@ def _register(conn: sqlite3.Connection, storage: StorageConfig,
                         # 各候補の raw/normalized/timezone/解釈条件/採否/不採用理由(再現可能性)
                         "recording_start_candidates": list(result.recording_start_candidates)},
                 media_asset_id=result.media_asset_id)
-    downloaded.unlink(missing_ok=True)  # 原本はoriginals/とDrive上に存在
+    _discard_tmp(storage, job)  # 原本はoriginals/とDrive上に存在
+
+
+def _ensure_source_unchanged(conn: sqlite3.Connection, client: DriveClient,
+                             storage: StorageConfig, job: sqlite3.Row) -> bool:
+    """再開時(downloading / downloaded から)、Drive 上のファイルがジョブ行の観測値
+    (size_bytes / modified_time)から変わっていないか確認する。
+
+    変わっていれば一時ファイルを捨てて waiting_for_upload へ戻し、安定確認からやり直す
+    (アップロードが一時停止して安定判定を通過した部分ファイルを再試行で使い続け、
+    完成後も永久に取り込めなくなる経路の解消。自己レビュー第2周)。戻した場合 False。
+    """
+    info = client.get_file_info(job["drive_file_id"])
+    if info.trashed:
+        raise SourceRemovedError("発見後に受け箱から取り消された(ゴミ箱)ため取込を中止")
+    same = (info.size_bytes == job["size_bytes"] and info.modified_time == job["modified_time"])
+    if same:
+        return True
+    _discard_tmp(storage, job)
+    _transition(conn, job["id"], "waiting_for_upload",
+                message="Drive上のファイルが変化したため一時ファイルを破棄して安定確認からやり直し",
+                detail={"before": {"size": job["size_bytes"], "modified": job["modified_time"]},
+                        "after": {"size": info.size_bytes, "modified": info.modified_time}},
+                stable_probe_json=None, size_bytes=info.size_bytes, modified_time=info.modified_time)
+    return False
 
 
 def _upload_results(conn: sqlite3.Connection, client: DriveClient,
@@ -235,7 +414,9 @@ def _upload_results(conn: sqlite3.Connection, client: DriveClient,
                     job: sqlite3.Row) -> None:
     """results/<job_id>/ へ status.json と summary.csv を返却する。"""
     results_root = client.ensure_folder(cfg.results_parent_folder_id, "results")
+    remember_secret(results_root)   # 以降の例外文言(URL)に現れても伏せる
     job_folder = client.ensure_folder(results_root, job["results_folder_name"])
+    remember_secret(job_folder)
 
     media = None
     media_id = job["media_asset_id"] or job["duplicate_of_media_asset_id"]
@@ -311,6 +492,11 @@ def process_pending(conn: sqlite3.Connection, client: DriveClient,
             if status == "retry_required":
                 status = job["resume_status"] or "waiting_for_upload"
                 _transition(conn, job_id, status, message="再試行")
+                if status in ("downloading", "downloaded"):
+                    job = _reload(conn, job_id)
+                    if not _ensure_source_unchanged(conn, client, storage, job):
+                        summary.waiting += 1
+                        continue
             if status == "discovered":
                 _transition(conn, job_id, "waiting_for_upload")
                 status = "waiting_for_upload"
@@ -359,13 +545,49 @@ def process_pending(conn: sqlite3.Connection, client: DriveClient,
             if status == "uploading_results":
                 job = _reload(conn, job_id)
                 _upload_results(conn, client, cfg, storage, job)
-                _transition(conn, job_id, "completed", message="結果返却完了")
+                # 完了時は復旧前の最終エラーを消す(履歴は IngestEvent に残る)
+                _transition(conn, job_id, "completed", message="結果返却完了", error=None)
+                _discard_tmp(storage, job)  # 遷移とunlinkの間のクラッシュで残った一時ファイルも回収
                 summary.completed += 1
-        except (OSError, MediaRegistrationError, sqlite3.DatabaseError) as exc:
+        except SourceRemovedError as exc:
+            # 受け箱から取り消されたファイル:待っても戻らないため再試行せず failed
             job = _reload(conn, job_id)
+            _transition(conn, job_id, "failed", message=str(exc), error=str(exc))
+            _discard_tmp(storage, job)
+            summary.failed += 1
+        except Exception as exc:  # noqa: BLE001 — ジョブ単位で隔離(KeyboardInterruptは通す)
+            # Drive API(HttpError等)・I/O・DB・登録エラーのいずれも、他ジョブと
+            # 継続実行を止めずにこのジョブの再試行/失敗として記録する(T-113)。
+            # 保存する文言はフォルダID等を伏せる(HttpErrorはURLにフォルダIDを含む)
+            job = _reload(conn, job_id)
+            error = _describe_error(exc, cfg)
+            category = _classify(exc)
+            label = ingest_errors.CATEGORY_LABELS[category]
             resume = job["status"] if job["status"] in RETRYABLE_STATUSES else "waiting_for_upload"
-            outcome = _fail_or_retry(conn, job, cfg, resume, f"{type(exc).__name__}: {exc}")
+            if category == ingest_errors.AUTH:
+                # 再認可・設定修正など人の対応が必要:ジョブの再試行回数は消費せず、
+                # 状態も変えずに記録だけ残し、サイクルを止めて呼び出し側へ案内する
+                _transition(conn, job_id, job["status"],
+                            message=f"{label}のためワーカー停止: {error}", error=error)
+                raise WorkerFatalError(
+                    f"{label}: {error}(ジョブ {job_id} は再試行回数を消費せず保持)") from exc
+            if category in ingest_errors.WAITABLE:
+                # 通信断・一時障害・レート制限は待てば直る:再試行回数を消費せず、
+                # 次サイクルで同じ段階から再開する(制限解除後に自動再開。T-113)。
+                # 内部データ異常・権限不足・削除済み等は下の通常再試行→上限で failed
+                if job["status"] == "waiting_for_upload":
+                    _transition(conn, job_id, "waiting_for_upload",
+                                message=f"完了確認で{label}(待機継続): {error}", error=error)
+                    summary.waiting += 1
+                else:
+                    _transition(conn, job_id, "retry_required",
+                                message=f"{label}(再試行回数を消費せず次サイクルで再開): {error}",
+                                error=error, resume_status=resume)
+                    summary.retrying += 1
+                continue
+            outcome = _fail_or_retry(conn, job, cfg, resume, error)
             if outcome == "failed":
+                _discard_tmp(storage, job)  # 終端状態:DL済みファイルを残さない
                 summary.failed += 1
             else:
                 summary.retrying += 1
@@ -375,8 +597,23 @@ def process_pending(conn: sqlite3.Connection, client: DriveClient,
 def run_cycle(conn: sqlite3.Connection, client: DriveClient, cfg: DriveIngestConfig,
               storage: StorageConfig, survey_session_id: str,
               analysis_hook=None) -> CycleSummary:
-    """1サイクル:受け箱の発見+未完了ジョブの処理。定期実行のエントリポイント。"""
-    created = discover(conn, client, cfg, survey_session_id)
+    """1サイクル:受け箱の発見+未完了ジョブの処理。定期実行のエントリポイント。
+
+    受け箱一覧(discover)はサイクル最初の API 呼び出しであり、実クライアントでは
+    期限切れトークンの更新失敗(RefreshError)がここで出る。ジョブ処理と同じ分類で
+    認証・設定エラーは WorkerFatalError に変換し、CLI が exit 2 で案内できるようにする。
+    通信断・レート制限・その他はそのまま伝播し、CLI は「サイクル失敗」として次回再試行する。
+    """
+    try:
+        created = discover(conn, client, cfg, survey_session_id)
+    except WorkerFatalError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if _classify(exc) == ingest_errors.AUTH:
+            label = ingest_errors.CATEGORY_LABELS[ingest_errors.AUTH]
+            raise WorkerFatalError(
+                f"{label}: {_describe_error(exc, cfg)}(受け箱一覧の取得時)") from exc
+        raise
     summary = process_pending(conn, client, cfg, storage, analysis_hook=analysis_hook)
     summary.discovered = len(created)
     return summary

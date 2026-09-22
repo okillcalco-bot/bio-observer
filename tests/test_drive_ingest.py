@@ -4,6 +4,7 @@
 E2EスモークテストはWindows解析PC上で実施)。メディアは合成のみ使用。
 """
 
+import hashlib
 import json
 import subprocess
 
@@ -51,14 +52,19 @@ class FakeDrive:
         self.files[file_id]["content"] = content
         self.files[file_id]["modified"] += "!"
 
+    def trash(self, file_id: str):
+        """利用者が発見後にファイルをゴミ箱へ移動した状況(受け箱一覧からは消える)。"""
+        self.files[file_id]["trashed"] = True
+
     def _info(self, file_id: str) -> DriveFileInfo:
         f = self.files[file_id]
         return DriveFileInfo(file_id=file_id, name=f["name"], mime_type=f["mime"],
-                             size_bytes=len(f["content"]), modified_time=f["modified"])
+                             size_bytes=len(f["content"]), modified_time=f["modified"],
+                             trashed=f.get("trashed", False))
 
     def list_files(self, folder_id):
         return [self._info(fid) for fid, f in self.files.items()
-                if f["parent"] == folder_id]
+                if f["parent"] == folder_id and not f.get("trashed")]
 
     def get_file_info(self, file_id):
         return self._info(file_id)
@@ -441,6 +447,593 @@ def test_ingest_uses_drive_modified_time_when_no_creation_time(
     assert candidates[1]["adopted"] is True
     assert candidates[1]["raw_value"] == "2026-07-29T08:05:00.000Z"
     assert candidates[2]["adopted"] is False and candidates[2]["rejection_reason"]
+
+
+def test_non_oserror_exception_is_isolated_per_job(db, seed, storage, cfg, sample_bytes):
+    """T-113:Drive API等の任意例外(OSError以外)でも継続実行が止まらず再試行対象になる。"""
+    drive = FakeDrive()
+    bad = drive.add_inbox_file("IMG_bad.MOV", sample_bytes)
+    drive.add_inbox_file("IMG_ok.MOV", sample_bytes + b"\x00")  # 別内容(ハッシュが異なる)
+    original_download = drive.download_file
+
+    class FakeHttpError(Exception):  # googleapiclient.errors.HttpError はOSErrorではない
+        pass
+
+    def download(file_id, dest):
+        if file_id == bad:
+            # resp を持たない任意例外(分類は permanent=通常の再試行)。文言中の 500 は分類に使われない
+            raise FakeHttpError("unexpected api failure while requesting .../files/%s" % bad)
+        return original_download(file_id, dest)
+
+    drive.download_file = download
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])  # 例外が伝播しない
+    assert summary.retrying == 1 and summary.completed == 1
+    statuses = {j["original_file_name"]: j["status"]
+                for j in db.execute("SELECT original_file_name, status FROM ingest_job")}
+    assert statuses == {"IMG_bad.MOV": "retry_required", "IMG_ok.MOV": "completed"}
+    assert "FakeHttpError" in db.execute(
+        "SELECT error FROM ingest_job WHERE original_file_name = 'IMG_bad.MOV'").fetchone()[0]
+
+
+def test_polling_error_does_not_consume_retries(db, seed, storage, cfg, sample_bytes):
+    """T-113:完了待ち段階の通信エラーは再試行回数を消費せず待機を継続する。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_poll.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    original_info = drive.get_file_info
+    # 通信断は具体的な型で判定される(素の OSError は通信断とは見なさない)
+    drive.get_file_info = lambda fid: (_ for _ in ()).throw(ConnectionResetError("network down"))
+    for _ in range(cfg.max_retries + 2):  # 上限を超える回数の失敗
+        summary = run_cycle(db, drive, cfg, storage, seed["session"])
+        assert summary.waiting == 1 and summary.failed == 0 and summary.retrying == 0
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert job["status"] == "waiting_for_upload" and job["retry_count"] == 0
+    assert "network down" in job["error"]
+    assert _events(db, job["id"]).count("waiting_for_upload") >= cfg.max_retries + 2
+    # 通信が回復すれば通常どおり完了する
+    drive.get_file_info = original_info
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    assert summary.completed == 1
+
+
+def test_stability_probe_without_observed_at_is_tolerated(db, seed, storage, cfg, sample_bytes):
+    """T-113(補助):observed_at のない probe(旧形式・手動編集)で KeyError にならない。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_probe.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    job_id = db.execute("SELECT id FROM ingest_job").fetchone()["id"]
+    db.execute("UPDATE ingest_job SET stable_probe_json = ? WHERE id = ?",
+               (json.dumps({"size": len(sample_bytes), "modified": "2026-08-09T00:00:00Z",
+                            "confirmations": 1}), job_id))
+    db.commit()
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    assert summary.failed == 0  # 例外にならず数え直し(次サイクルで成立)
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    assert summary.completed == 1
+
+
+_REALISTIC_FOLDER_ID = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456"  # 架空(実IDではない)
+
+
+def _cfg_with_real_looking_ids() -> DriveIngestConfig:
+    return DriveIngestConfig(inbox_folder_id=_REALISTIC_FOLDER_ID,
+                             results_parent_folder_id=_REALISTIC_FOLDER_ID,
+                             max_retries=2, stability_confirmations=2,
+                             stability_interval_seconds=0)
+
+
+def _all_persisted_text(db) -> str:
+    """ingest_job.error と ingest_event の message/detail をまとめて返す(漏えい検査用)。"""
+    parts = [r[0] or "" for r in db.execute("SELECT error FROM ingest_job")]
+    parts += [f"{r[0] or ''} {r[1] or ''}" for r in
+              db.execute("SELECT message, detail_json FROM ingest_event")]
+    return "\n".join(parts)
+
+
+def test_persisted_errors_do_not_contain_folder_ids(db, seed, storage, sample_bytes):
+    """T-113再レビュー:例外文言に含まれるフォルダIDは DB(ingest_job.error)・
+    IngestEvent へ保存する前に伏せられる(CLI表示だけでなく保存経路も安全化)。"""
+    cfg2 = _cfg_with_real_looking_ids()
+    drive = FakeDrive()
+    fid = drive.add_inbox_file("IMG_leak.MOV", sample_bytes)
+    drive.files[fid]["parent"] = cfg2.inbox_folder_id
+    url = f"https://www.googleapis.com/drive/v3/files/{fid}?q='{cfg2.inbox_folder_id}'+in+parents"
+    # 完了待ち段階(通信エラー扱い)とダウンロード段階(再試行)の両方で保存文言を検査
+    drive.get_file_info = lambda _fid: (_ for _ in ()).throw(
+        ConnectionError(f"<HttpError 503 when requesting {url} returned 'Backend Error'>"))
+    run_cycle(db, drive, cfg2, storage, seed["session"])
+    run_cycle(db, drive, cfg2, storage, seed["session"])
+    drive.get_file_info = lambda _fid: drive._info(_fid)
+    drive.download_file = lambda _fid, _dest: (_ for _ in ()).throw(
+        OSError(f"<HttpError 500 when requesting {url}?alt=media>"))
+    run_cycle(db, drive, cfg2, storage, seed["session"])
+    run_cycle(db, drive, cfg2, storage, seed["session"])
+    persisted = _all_persisted_text(db)
+    assert "HttpError" in persisted                       # 内容は残る
+    assert cfg2.inbox_folder_id not in persisted          # フォルダIDは残らない
+    assert "1AbC…(設定済み)" in persisted                  # 先頭4文字のマスクに置換
+    job = db.execute("SELECT error, status FROM ingest_job").fetchone()
+    assert cfg2.inbox_folder_id not in job["error"] and job["status"] == "retry_required"
+
+
+def test_data_anomaly_in_waiting_consumes_retries(db, seed, storage, cfg, sample_bytes):
+    """T-113再レビュー:完了待ち段階でも内部データ異常(通信断ではない例外)は
+    再試行回数を消費し、上限で failed になる(永久待機にしない)。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_anomaly.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    drive.get_file_info = lambda _fid: (_ for _ in ()).throw(ValueError("unexpected payload"))
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    assert summary.retrying == 1 and summary.waiting == 0
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert job["status"] == "retry_required" and job["retry_count"] == 1
+    assert job["resume_status"] == "waiting_for_upload"
+    for _ in range(cfg.max_retries):
+        summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    assert summary.failed == 1
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert job["status"] == "failed" and job["retry_count"] == cfg.max_retries + 1
+    assert "ValueError" in job["error"]
+
+
+def test_http_status_decides_transient_in_waiting(db, seed, storage, cfg, sample_bytes):
+    """T-113再レビュー:HttpError 相当は HTTP ステータスで区別する。
+    5xx/429 は通信障害(待機継続・再試行消費なし)、404/403 は待っても直らないため再試行消費。"""
+    class FakeResp:
+        def __init__(self, status):
+            self.status = status
+
+    class FakeHttpError(Exception):  # googleapiclient.errors.HttpError と同じ属性形状
+        def __init__(self, status):
+            super().__init__(f"<HttpError {status}>")
+            self.resp = FakeResp(status)
+
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_http.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    drive.get_file_info = lambda _fid: (_ for _ in ()).throw(FakeHttpError(503))
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT status, retry_count FROM ingest_job").fetchone()
+    assert summary.waiting == 1 and tuple(job) == ("waiting_for_upload", 0)
+    drive.get_file_info = lambda _fid: (_ for _ in ()).throw(FakeHttpError(404))
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT status, retry_count FROM ingest_job").fetchone()
+    assert summary.retrying == 1 and tuple(job) == ("retry_required", 1)
+
+
+@pytest.mark.parametrize("probe_json, reason_part", [
+    ("{not json", "解釈できない"),
+    ('["a", "b"]', "想定形式でない"),
+    (json.dumps({"size": 1, "modified": "x", "confirmations": 1,
+                 "observed_at": "garbage"}), "observed_at / confirmations"),
+    (json.dumps({"size": 1, "modified": "x", "confirmations": "2",
+                 "observed_at": "2026-08-09T00:00:00Z"}), "observed_at / confirmations"),
+    (json.dumps({"size": 1, "modified": "x", "confirmations": 1,
+                 "observed_at": "2026-08-09T00:00:00"}), "observed_at / confirmations"),  # naive
+])
+def test_corrupted_probe_is_reinitialized_not_stuck(db, seed, storage, cfg, sample_bytes,
+                                                    probe_json, reason_part):
+    """T-113再レビュー:壊れた観測情報(JSON・観測日時・確認回数)は例外にも永久待機にもせず、
+    初期化して再確認する(IngestEvent に理由を記録)。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_probe.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    job_id = db.execute("SELECT id FROM ingest_job").fetchone()["id"]
+    db.execute("UPDATE ingest_job SET stable_probe_json = ? WHERE id = ?", (probe_json, job_id))
+    db.commit()
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job = _job(db, job_id)
+    assert summary.failed == 0 and summary.retrying == 0 and summary.waiting == 1
+    assert job["status"] == "waiting_for_upload" and job["retry_count"] == 0
+    probe = json.loads(job["stable_probe_json"])
+    assert probe["confirmations"] == 1 and probe["observed_at"].endswith("Z")
+    messages = [r[0] for r in db.execute(
+        "SELECT message FROM ingest_event WHERE ingest_job_id = ? ORDER BY rowid", (job_id,))]
+    assert any(m and "観測情報を初期化" in m and reason_part in m for m in messages)
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])  # 数え直して完了
+    assert summary.completed == 1
+
+
+def _make_http_error(status: int, reason: str | None = None, uri: str = "https://www.googleapis.com/drive/v3/files"):
+    """googleapiclient.errors.HttpError の実物を組み立てる(drive extra が必要)。"""
+    errors_mod = pytest.importorskip("googleapiclient.errors")
+    httplib2 = pytest.importorskip("httplib2")
+    resp = httplib2.Response({"status": status, "reason": "x"})
+    body = {"error": {"code": status, "message": reason or "error"}}
+    if reason:
+        body["error"]["errors"] = [{"domain": "usageLimits", "reason": reason, "message": reason}]
+    return errors_mod.HttpError(resp, json.dumps(body).encode(), uri=uri)
+
+
+def test_classify_error_standard_exceptions():
+    """T-113再レビュー:分類はモジュール名の一括判定ではなく、具体的な例外型で行う(標準例外)。"""
+    import errno
+    import http.client
+    import socket
+    import ssl
+    from bio_observer.ingest.errors import AUTH, PERMANENT, TRANSIENT, classify_error
+
+    # 通信断(具体的な型 / errno)
+    for exc in (ConnectionResetError("reset"), TimeoutError("t"), socket.gaierror(8, "dns"),
+                ssl.SSLEOFError("eof"), http.client.RemoteDisconnected("closed"),
+                OSError(errno.EHOSTUNREACH, "unreachable")):
+        assert classify_error(exc) == TRANSIENT, exc
+    # 認証・設定(人の対応が必要):証明書検証失敗は SSLError(=OSError)でも待たない
+    assert classify_error(ssl.SSLCertVerificationError(1, "certificate verify failed")) == AUTH
+    # 内部データ異常・ローカルI/O・素の OSError は permanent(通常の再試行→failed)
+    for exc in (ValueError("bad"), KeyError("k"), json.JSONDecodeError("m", "d", 0),
+                FileNotFoundError("missing"), PermissionError("denied"),
+                OSError(errno.ENOSPC, "no space"), OSError("plain")):
+        assert classify_error(exc) == PERMANENT, exc
+
+    # HttpError 互換(resp.status)の応答本文が想定外の形でも分類器は落ちない
+    class Resp:
+        status = 403
+
+    class OddHttpError(Exception):
+        resp = Resp()
+        content = b'{"error": {"errors": {"reason": "x"}, "details": "y", "status": 5}}'
+
+    assert classify_error(OddHttpError("<HttpError 403>")) == PERMANENT
+
+
+def test_classify_error_google_library_exceptions():
+    """T-113再レビュー:google-auth / httplib2 / HttpError の実物で分類表を確認(drive extra 必要)。"""
+    from bio_observer.ingest.errors import AUTH, PERMANENT, RATE_LIMITED, TRANSIENT, classify_error
+    gauth = pytest.importorskip("google.auth.exceptions")
+    httplib2 = pytest.importorskip("httplib2")
+    assert classify_error(gauth.RefreshError("invalid_grant: Token has been expired or revoked")) == AUTH
+    assert classify_error(gauth.DefaultCredentialsError("no creds")) == AUTH
+    # トークンサーバ側の一時障害(500/503・temporarily_unavailable)は retryable=True で返る:
+    # 再認可を誤案内してワーカーを止めず、通信断として待つ
+    assert classify_error(gauth.RefreshError("temporarily_unavailable", retryable=True)) == TRANSIENT
+    assert classify_error(gauth.TransportError("connection aborted")) == TRANSIENT
+    assert classify_error(httplib2.ServerNotFoundError("Unable to find the server")) == TRANSIENT
+    # HttpError:ステータス+reason
+    assert classify_error(_make_http_error(403, "userRateLimitExceeded")) == RATE_LIMITED
+    assert classify_error(_make_http_error(403, "rateLimitExceeded")) == RATE_LIMITED
+    assert classify_error(_make_http_error(429, "rateLimitExceeded")) == RATE_LIMITED
+    assert classify_error(_make_http_error(403, "insufficientFilePermissions")) == PERMANENT
+    assert classify_error(_make_http_error(403, "storageQuotaExceeded")) == PERMANENT
+    assert classify_error(_make_http_error(404, "notFound")) == PERMANENT
+    assert classify_error(_make_http_error(401, "authError")) == AUTH
+    assert classify_error(_make_http_error(503, "backendError")) == TRANSIENT
+    assert classify_error(_make_http_error(500)) == TRANSIENT
+
+
+def test_rate_limit_403_does_not_consume_retries_and_resumes(db, seed, storage, cfg, sample_bytes):
+    """T-113再レビュー:403 rateLimitExceeded / userRateLimitExceeded は再試行回数を消費せず、
+    制限解除後に同じ段階から再開して完了する(権限不足の403は通常どおり再試行消費)。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_rate.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])  # 発見・安定確認1回目
+    # 2サイクル目以降、ダウンロード段階でレート制限が続く(上限回数を超えても failed にならない)
+    original_download = drive.download_file
+    drive.download_file = lambda fid, dest: (_ for _ in ()).throw(
+        _make_http_error(403, "userRateLimitExceeded"))
+    for _ in range(cfg.max_retries + 3):
+        summary = run_cycle(db, drive, cfg, storage, seed["session"])
+        assert summary.failed == 0
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert job["status"] == "retry_required" and job["retry_count"] == 0
+    assert job["resume_status"] == "downloading"
+    assert "userRateLimitExceeded" in job["error"]
+    messages = [r[0] for r in db.execute("SELECT message FROM ingest_event ORDER BY rowid")]
+    assert any(m and "レート制限" in m and "消費せず" in m for m in messages)
+    # 制限解除 → 同じ段階から再開して完了
+    drive.download_file = original_download
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    assert summary.completed == 1
+    # 権限不足の 403 は待っても直らない:通常の再試行消費(同じフェイク上で別ファイル)
+    perm_fid = drive.add_inbox_file("IMG_perm.MOV", sample_bytes + b"\x01")
+    run_cycle(db, drive, cfg, storage, seed["session"])  # 発見
+    original_info = drive.get_file_info
+    drive.get_file_info = lambda fid: (_ for _ in ()).throw(
+        _make_http_error(403, "insufficientFilePermissions")) if fid == perm_fid else original_info(fid)
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    perm = db.execute("SELECT status, retry_count FROM ingest_job "
+                      "WHERE original_file_name = 'IMG_perm.MOV'").fetchone()
+    assert summary.retrying == 1 and tuple(perm) == ("retry_required", 1)
+
+
+def test_auth_error_stops_cycle_without_consuming_retries(db, seed, storage, cfg, sample_bytes):
+    """T-113再レビュー:再認可が必要な認証失敗・証明書検証失敗は「通信断」として無期限待機せず、
+    ジョブを変えずに WorkerFatalError でサイクルを止める(人の対応を促す)。"""
+    import ssl
+    gauth = pytest.importorskip("google.auth.exceptions")
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_auth.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    for exc in (gauth.RefreshError("invalid_grant: Token has been expired or revoked"),
+                ssl.SSLCertVerificationError(1, "certificate verify failed"),
+                _make_http_error(401, "authError")):
+        drive.get_file_info = lambda fid, exc=exc: (_ for _ in ()).throw(exc)
+        with pytest.raises(worker.WorkerFatalError) as info:
+            run_cycle(db, drive, cfg, storage, seed["session"])
+        assert "認証・設定エラー" in str(info.value)
+        job = db.execute("SELECT status, retry_count, error FROM ingest_job").fetchone()
+        assert job["status"] == "waiting_for_upload" and job["retry_count"] == 0
+        assert job["error"]  # 原因は記録される
+    messages = [r[0] for r in db.execute("SELECT message FROM ingest_event ORDER BY rowid")]
+    assert sum(1 for m in messages if m and "ワーカー停止" in m) == 3
+    # 対処後(再認可)は通常どおり再開して完了する
+    drive.get_file_info = lambda fid: drive._info(fid)
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    assert summary.completed == 1
+
+
+class _RealisticFolderDrive(FakeDrive):
+    """ensure_folder が実IDに似た長いフォルダIDを返し、返却時に URL 付きのエラーを出すフェイク。"""
+
+    def __init__(self):
+        super().__init__()
+        self.fail_upload = True
+
+    def ensure_folder(self, parent_id, name):
+        fid = super().ensure_folder(parent_id, name)
+        realistic = f"1Res{name}FolderIdXyZ0123456789abcdefgh"[:33]
+        if fid != realistic:
+            self.folders[realistic] = self.folders.pop(fid)
+        return realistic
+
+    def upload_file(self, folder_id, source, name):
+        if self.fail_upload:
+            # HttpError 互換の形(resp.status=500)。drive extra なしでも検証できるよう実物は使わない
+            class Resp:
+                status = 500
+
+            class FakeHttpError(Exception):
+                resp = Resp()
+
+            raise FakeHttpError(
+                "<HttpError 500 when requesting https://www.googleapis.com/upload/drive/v3/files"
+                f"?parents={folder_id} returned 'Backend Error'>")
+        return super().upload_file(folder_id, source, name)
+
+
+def test_result_folder_ids_learned_at_runtime_are_masked(db, seed, storage, sample_bytes):
+    """T-113再レビュー:設定値だけでなく、処理中に取得した結果フォルダID(results/・results/<job_id>/)
+    も DB・イベントへ保存する前に伏せられる。"""
+    cfg2 = _cfg_with_real_looking_ids()
+    drive = _RealisticFolderDrive()
+    fid = drive.add_inbox_file("IMG_res.MOV", sample_bytes)
+    drive.files[fid]["parent"] = cfg2.inbox_folder_id
+    for _ in range(3):
+        run_cycle(db, drive, cfg2, storage, seed["session"])
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert job["status"] == "retry_required" and job["resume_status"] == "uploading_results"
+    assert job["retry_count"] == 0  # 5xx は待機扱い(消費なし)
+    learned = [f for f in drive.folders if f.startswith("1Res")]
+    assert len(learned) == 2
+    persisted = _all_persisted_text(db)
+    assert "HttpError 500" in persisted
+    for folder_id in learned + [cfg2.inbox_folder_id]:
+        assert folder_id not in persisted, folder_id
+    assert "1Res" in persisted and "…(設定済み)" in persisted
+    # 障害解消後に返却が完了する
+    drive.fail_upload = False
+    summary = run_cycle(db, drive, cfg2, storage, seed["session"])
+    assert summary.completed == 1
+
+
+def test_auth_error_during_discover_becomes_fatal(db, seed, storage, cfg, sample_bytes):
+    """自己レビュー:受け箱一覧(discover)での認証エラーも WorkerFatalError(サイクル最初の API で
+    トークン更新失敗が出るため)。通信断はそのまま伝播し CLI が次回再試行する。"""
+    import ssl
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_disc.MOV", sample_bytes)
+    drive.list_files = lambda folder_id: (_ for _ in ()).throw(
+        ssl.SSLCertVerificationError(1, "certificate verify failed"))
+    with pytest.raises(worker.WorkerFatalError, match="受け箱一覧"):
+        run_cycle(db, drive, cfg, storage, seed["session"])
+    drive.list_files = lambda folder_id: (_ for _ in ()).throw(ConnectionResetError("reset"))
+    with pytest.raises(ConnectionResetError):
+        run_cycle(db, drive, cfg, storage, seed["session"])
+    assert db.execute("SELECT COUNT(*) FROM ingest_job").fetchone()[0] == 0  # 副作用なし
+
+
+def test_future_observed_at_is_reinitialized(db, seed, storage, sample_bytes):
+    """自己レビュー:観測時刻が未来(PC時計のずれ)だと間隔判定が永久に成立しないため初期化する。"""
+    cfg60 = DriveIngestConfig(inbox_folder_id="inbox", results_parent_folder_id="inbox",
+                              max_retries=2, stability_confirmations=2,
+                              stability_interval_seconds=60)
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_future.MOV", sample_bytes)
+    run_cycle(db, drive, cfg60, storage, seed["session"])
+    job_id = db.execute("SELECT id FROM ingest_job").fetchone()["id"]
+    probe = json.loads(_job(db, job_id)["stable_probe_json"])
+    probe["observed_at"] = "2099-01-01T00:00:00Z"
+    db.execute("UPDATE ingest_job SET stable_probe_json = ? WHERE id = ?",
+               (json.dumps(probe), job_id))
+    db.commit()
+    run_cycle(db, drive, cfg60, storage, seed["session"])
+    probe = json.loads(_job(db, job_id)["stable_probe_json"])
+    assert probe["confirmations"] == 1 and probe["observed_at"] < "2099"
+    messages = [r[0] for r in db.execute(
+        "SELECT message FROM ingest_event WHERE ingest_job_id = ? ORDER BY rowid", (job_id,))]
+    assert any(m and "未来" in m for m in messages)
+
+
+def test_error_is_cleared_on_completion(db, seed, storage, cfg, sample_bytes):
+    """自己レビュー:復旧して完了した行に旧エラーを残さない(履歴は IngestEvent に残る)。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_clear.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    original_info = drive.get_file_info
+    drive.get_file_info = lambda fid: (_ for _ in ()).throw(ConnectionResetError("network down"))
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    assert "network down" in db.execute("SELECT error FROM ingest_job").fetchone()[0]
+    drive.get_file_info = original_info
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT status, error FROM ingest_job").fetchone()
+    assert summary.completed == 1 and tuple(job) == ("completed", None)
+    assert any("network down" in (r[0] or "") for r in
+               db.execute("SELECT message FROM ingest_event"))
+
+
+def test_short_or_alias_folder_ids_are_not_redacted(db, seed, storage, cfg, sample_bytes):
+    """自己レビュー:"root"(マイドライブ別名)や "inbox" のような短い設定値は置換対象にしない
+    (パス・無関係な文言を壊さない)。実 Drive ID(25文字以上)は従来どおり伏せる。"""
+    cfg_root = DriveIngestConfig(inbox_folder_id="root", results_parent_folder_id="root")
+    text = "OSError: /data/root/ingest_tmp/x.mov (results_root)"
+    assert worker.redact_secrets(text, worker.all_secrets(cfg_root)) == text
+    long_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456"
+    cfg_long = DriveIngestConfig(inbox_folder_id=long_id, results_parent_folder_id="root")
+    assert long_id not in worker.redact_secrets(f"q='{long_id}' in parents",
+                                                worker.all_secrets(cfg_long))
+    worker.remember_secret("gfold01")  # 短い取得値も登録されない
+    assert "gfold01" not in worker.all_secrets(cfg_root)
+
+
+def _tmp_files(storage):
+    d = storage.data_root / "ingest_tmp"
+    return sorted(p.name for p in d.iterdir()) if d.exists() else []
+
+
+def _crash_after(monkeypatch, target_status: str):
+    """_transition が target_status へ遷移した直後(commit 後)にクラッシュさせる。"""
+    original = worker._transition
+
+    def crashing(conn, job_id, to_status, *a, **k):
+        original(conn, job_id, to_status, *a, **k)
+        if to_status == target_status:
+            monkeypatch.setattr(worker, "_transition", original)
+            raise KeyboardInterrupt
+    monkeypatch.setattr(worker, "_transition", crashing)
+
+
+def test_resume_after_crash_between_register_commit_and_registered_transition(
+        db, seed, storage, cfg, sample_bytes, monkeypatch):
+    """自己レビュー第2周:register_media の commit 直後〜registered 遷移前のクラッシュでは、
+    再開時に自ジョブの資産(note)を採用する(再コピー→「自分の資産の重複」にしない)。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_own.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    original_register = worker.register_media
+
+    def register_then_crash(*a, **k):
+        original_register(*a, **k)  # commit 済み
+        monkeypatch.setattr(worker, "register_media", original_register)
+        raise KeyboardInterrupt
+    monkeypatch.setattr(worker, "register_media", register_then_crash)
+    with pytest.raises(KeyboardInterrupt):
+        run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert job["status"] == "downloaded" and job["media_asset_id"] is None
+    assert db.execute("SELECT COUNT(*) FROM media_asset WHERE note = ?",
+                      (f"ingest:{job['id']}",)).fetchone()[0] == 1
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert summary.completed == 1
+    assert job["status"] == "completed" and job["duplicate_of_media_asset_id"] is None
+    assert job["media_asset_id"] is not None
+    assert db.execute("SELECT COUNT(*) FROM media_asset WHERE note LIKE 'ingest:%'").fetchone()[0] == 1
+    assert any(m and "クラッシュ前に登録済み" in m for (m,) in
+               db.execute("SELECT message FROM ingest_event"))
+    assert _tmp_files(storage) == []
+    status = json.loads(drive.results_files(job["id"])["status.json"])
+    assert status["media_asset_id"] == job["media_asset_id"]
+
+
+@pytest.mark.parametrize("crash_at", ["registered", "uploading_results", "completed"])
+def test_tmp_file_is_not_orphaned_after_crash(db, seed, storage, cfg, sample_bytes,
+                                              monkeypatch, crash_at):
+    """自己レビュー第2周:遷移直後(unlink 前)のクラッシュでも一時DLファイルが残らない。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_orphan.MOV", sample_bytes)
+    if crash_at == "uploading_results":  # 重複経路:同一内容を先に登録しておく
+        drive.add_inbox_file("IMG_first.MOV", sample_bytes)
+        drive.files["gdrv0001"]["parent"] = "elsewhere"  # 最初は2本目だけ処理
+        run_cycle(db, drive, cfg, storage, seed["session"])
+        run_cycle(db, drive, cfg, storage, seed["session"])
+        drive.files["gdrv0001"]["parent"] = "inbox"
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    _crash_after(monkeypatch, crash_at)
+    with pytest.raises(KeyboardInterrupt):
+        run_cycle(db, drive, cfg, storage, seed["session"])
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    statuses = [r[0] for r in db.execute("SELECT status FROM ingest_job")]
+    assert all(s == "completed" for s in statuses)
+    assert _tmp_files(storage) == []
+
+
+def test_tmp_file_removed_when_job_fails(db, seed, storage, cfg, sample_bytes):
+    """自己レビュー第2周:再試行上限で failed になった時点で一時DLファイルを回収する。"""
+    drive = FakeDrive()
+    drive.add_inbox_file("IMG_fail.MOV", b"not a video at all" * 1000)  # 登録が必ず失敗
+    for _ in range(cfg.max_retries + 3):
+        run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT status FROM ingest_job").fetchone()
+    assert job["status"] == "failed"
+    assert _tmp_files(storage) == []
+
+
+def test_stalled_upload_is_redownloaded_after_source_changes(db, seed, storage, cfg,
+                                                             sample_bytes):
+    """自己レビュー第2周:一時停止したアップロードの部分ファイルが安定判定を通過して DL・登録失敗
+    しても、Drive 側が変化(アップロード再開・完了)すれば一時ファイルを捨てて安定確認からやり直し、
+    完成したファイルを取り込む(従来は同じ壊れたファイルを再試行し続けて failed→永久に取込不能)。"""
+    drive = FakeDrive()
+    half = sample_bytes[: len(sample_bytes) // 2]
+    fid = drive.add_inbox_file("IMG_stall.MOV", half)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])  # 安定→DL→登録失敗(moov なし)
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert summary.retrying == 1 and job["status"] == "retry_required"
+    assert job["resume_status"] == "downloaded" and job["retry_count"] == 1
+    drive.set_content(fid, sample_bytes)  # アップロード完了
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert summary.waiting == 1 and job["status"] == "waiting_for_upload"
+    assert job["size_bytes"] == len(sample_bytes) and _tmp_files(storage) == []
+    assert any(m and "変化したため" in m for (m,) in db.execute("SELECT message FROM ingest_event"))
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert summary.completed == 1 and job["status"] == "completed"
+    assert db.execute("SELECT sha256 FROM media_asset WHERE id = ?",
+                      (job["media_asset_id"],)).fetchone()[0] == hashlib.sha256(
+        sample_bytes).hexdigest()
+
+
+def test_trashed_file_after_discovery_is_not_ingested(db, seed, storage, cfg, sample_bytes):
+    """自己レビュー第2周:発見後にゴミ箱へ移動されたファイルは DL・登録せず failed(再試行なし)。"""
+    drive = FakeDrive()
+    fid = drive.add_inbox_file("IMG_trash.MOV", sample_bytes)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    drive.trash(fid)
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job = db.execute("SELECT * FROM ingest_job").fetchone()
+    assert summary.failed == 1 and job["status"] == "failed" and job["retry_count"] == 0
+    assert "ゴミ箱" in job["error"]
+    assert db.execute("SELECT COUNT(*) FROM media_asset WHERE note LIKE 'ingest:%'").fetchone()[0] == 0
+    assert _tmp_files(storage) == []
+    # 再試行段階(downloaded から再開)でゴミ箱へ入った場合も同様
+    fid2 = drive.add_inbox_file("IMG_trash2.MOV", b"broken" * 1000)
+    run_cycle(db, drive, cfg, storage, seed["session"])
+    run_cycle(db, drive, cfg, storage, seed["session"])  # 登録失敗→retry_required(downloaded)
+    drive.trash(fid2)
+    summary = run_cycle(db, drive, cfg, storage, seed["session"])
+    job2 = db.execute("SELECT status FROM ingest_job WHERE drive_file_id = ?", (fid2,)).fetchone()
+    assert summary.failed == 1 and job2["status"] == "failed"
+
+
+def test_classify_html_token_response_and_proxy_errors():
+    """自己レビュー第2周:トークン応答が HTML(LB/プロキシの一時障害)の RefreshError は transient。
+    PySocks のプロキシ例外(errno=None・socket_err に実エラー)も transient。"""
+    from bio_observer.ingest.errors import AUTH, TRANSIENT, classify_error
+    gauth = pytest.importorskip("google.auth.exceptions")
+    assert classify_error(gauth.RefreshError("<html><body>503 Service Unavailable</body></html>")) == TRANSIENT
+    assert classify_error(gauth.RefreshError("invalid_grant: Token has been expired or revoked.")) == AUTH
+    assert classify_error(gauth.RefreshError("Not all required fields present")) == AUTH
+
+    class ProxyConnectionError(OSError):  # PySocks の形(モジュール socks、socket_err 属性)
+        pass
+    ProxyConnectionError.__module__ = "socks"
+    exc = ProxyConnectionError("Error connecting to HTTP proxy 127.0.0.1:9")
+    exc.socket_err = ConnectionRefusedError(111, "Connection refused")
+    assert exc.errno is None and classify_error(exc) == TRANSIENT
 
 
 def test_ingest_event_append_only(db, seed, cfg):

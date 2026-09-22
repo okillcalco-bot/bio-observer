@@ -30,6 +30,9 @@ drive = [
     "google-api-python-client==2.198.0",
     "google-auth==2.56.3",
     "google-auth-oauthlib==1.4.0",
+    # httplib2 は PySocks が無いと HTTPS_PROXY を黙って無視して直結する(プロキシ環境で
+    # 「初期化は成功・Drive API だけ接続不能」になる)。プロキシ設定を確実に効かせるため固定
+    "PySocks==1.7.1",
 ]
 
 [project.scripts]

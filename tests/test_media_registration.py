@@ -458,6 +458,41 @@ def test_candidate_records_are_reproducible(sample_video):
     assert candidates[1]["adopted"] is False
 
 
+def test_parse_timestamp_requires_date_and_time():
+    """自己レビュー:日付のみ・日付+オフセットのみは開始時刻として採用しない
+    (fromisoformat が "2026-07-29+09:00" の '+' を区切りと誤解釈する経路も塞ぐ)。"""
+    from bio_observer.media_registry import TZ_INVALID, parse_timestamp
+    for value in ("2026-07-29", "2026-07-29Z", "2026-07-29+09:00", "20260729"):
+        parsed = parse_timestamp(value, naive_timezone="+09:00")
+        assert parsed.timezone == TZ_INVALID and parsed.normalized_value is None, value
+    assert parse_timestamp("20260729T080100Z").normalized_value == "2026-07-29T08:01:00Z"
+    # 解釈条件のオフセット範囲外は不採用
+    assert parse_timestamp("2026-07-29 17:01:00", naive_timezone="+09:60").timezone == TZ_INVALID
+    assert parse_timestamp("2026-07-29 17:01:00", naive_timezone="+24:00").timezone == TZ_INVALID
+
+
+def test_invalid_basis_or_certainty_rejected_before_copy(db, seed, storage, sample_video,
+                                                        monkeypatch):
+    """自己レビュー:列挙外の basis / certainty はコピー・ハッシュ計算の前に ValueError。"""
+    called = []
+    monkeypatch.setattr(media_registry, "_copy_with_hash",
+                        lambda *a, **k: called.append(1) or (_ for _ in ()).throw(AssertionError))
+    with pytest.raises(ValueError, match="recording_start_basis"):
+        register_media(db, sample_video, seed["session"], storage=storage,
+                       recording_started_at="2026-08-01T00:00:00Z", recording_start_basis="bogus")
+    with pytest.raises(ValueError, match="recording_start_certainty"):
+        register_media(db, sample_video, seed["session"], storage=storage,
+                       recording_started_at="2026-08-01T00:00:00Z",
+                       recording_start_basis="manual", recording_start_certainty="sure")
+    assert called == [] and _leftover_files(storage) == []
+
+
+def test_probe_media_wraps_missing_ffprobe(sample_video):
+    """自己レビュー:ffprobe 不在は ProbeError(inspect-time / 登録の案内に統一)。"""
+    with pytest.raises(ProbeError, match="ffprobeを実行できません"):
+        probe_media(sample_video, ffprobe="/nonexistent/ffprobe-binary")
+
+
 def test_invalid_leading_tag_does_not_hide_later_valid_tag(monkeypatch, tmp_path):
     """T-112再レビュー:先頭の作成日時タグが不正でも、後続の有効タグを順に評価して採用する。
 
@@ -566,6 +601,29 @@ def test_metadata_basis_cannot_be_confirmed_automatically(
                        recording_started_at="2026-07-29T08:01:00Z",
                        recording_start_basis="metadata",
                        recording_start_certainty="confirmed")
+
+
+def test_caller_recording_time_is_validated_before_copy(db, seed, storage, sample_video):
+    """T-113:呼び出し側指定の日時はコピー前に検証・正規化する。"""
+    # 表記なし(timezone_unknown)はコピー前に ValueError(残骸なし)
+    with pytest.raises(ValueError, match="timezone_unknown"):
+        register_media(db, sample_video, seed["session"], storage=storage,
+                       recording_started_at="2026-08-01 09:00:00",
+                       recording_start_basis="manual")
+    assert _leftover_files(storage) == []
+    # 解釈不能も同様
+    with pytest.raises(ValueError, match="invalid"):
+        register_media(db, sample_video, seed["session"], storage=storage,
+                       recording_started_at="yesterday", recording_start_basis="manual")
+    # オフセット付きはUTCへ正規化して保存(従来はINSERT時のCHECK違反)
+    result = register_media(db, sample_video, seed["session"], storage=storage,
+                            recording_started_at="2026-08-01T09:00:00+09:00",
+                            recording_start_basis="manual",
+                            recording_start_certainty="confirmed")
+    row = db.execute("SELECT recording_started_at FROM media_asset WHERE id = ?",
+                     (result.media_asset_id,)).fetchone()
+    assert row[0] == "2026-08-01T00:00:00Z"
+    assert result.recording_start_source == "caller"
 
 
 def test_probe_media_reports_streams(sample_video, sample_wav):
