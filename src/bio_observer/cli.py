@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sqlite3
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 from bio_observer.config import StorageConfig
@@ -24,7 +26,7 @@ from bio_observer.db.ids import new_id, utc_now_iso
 from bio_observer.envcheck import check_command
 from bio_observer.ingest.drive import DriveIngestConfig
 from bio_observer.ingest import worker
-from bio_observer.ingest.worker import WorkerAlreadyRunningError
+from bio_observer.ingest.worker import WorkerAlreadyRunningError, WorkerFatalError
 
 # OAuth認可より前に検査できる必須設定(check-config / run 起動時)
 _REQUIRED_ENV = (
@@ -46,8 +48,67 @@ def _configure_windows_console() -> None:
 
 
 def _mask(value: str) -> str:
-    """識別子のマスク表示(先頭4文字のみ。アクセス権を与えうる値を全表示しない)。"""
-    return f"{value[:4]}…(設定済み)" if len(value) > 4 else "(設定済み)"
+    """識別子のマスク表示(先頭4文字のみ。アクセス権を与えうる値を全表示しない)。
+
+    保存経路(worker)と同じ規則を使い、表示と保存で伏せ方がずれないようにする。
+    """
+    return worker.mask_secret(value)
+
+
+def _redact(exc: BaseException, cfg: DriveIngestConfig) -> str:
+    """例外文言からDriveフォルダIDを伏せる(HttpErrorはリクエストURLを含むため)。
+
+    ワーカーがDB・イベントへ保存する際と同じ規則(worker.redact_secrets)を使う。
+    """
+    return worker.redact_secrets(f"{type(exc).__name__}: {exc}", worker.all_secrets(cfg))
+
+
+_SECRET_ENV_NAMES = ("BIO_OBSERVER_DRIVE_INBOX_FOLDER_ID",
+                     "BIO_OBSERVER_DRIVE_RESULTS_PARENT_FOLDER_ID")
+
+
+def _env_secrets() -> tuple[str, ...]:
+    """表示前に伏せる設定値(status は DriveIngestConfig を必須としないため環境変数から)。"""
+    return tuple(v for v in (os.environ.get(n) for n in _SECRET_ENV_NAMES)
+                 if v and len(v) >= worker.MIN_REDACT_LENGTH)
+
+
+def _check_naive_timezone(storage: StorageConfig) -> str | None:
+    """BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE の解釈条件が不正なら NG 文言を返す。
+
+    不正なまま動かすと、表記なしの creation_time が全件「解釈条件が不正」として
+    不採用になり、Drive 更新時刻へ降格する(実測記録で原因を誤認しうる)ため起動前に検査する。
+    """
+    from bio_observer.media_registry import _resolve_timezone
+    value = storage.media_naive_timezone
+    if not value:
+        return None
+    try:
+        _resolve_timezone(value)
+    except Exception:  # noqa: BLE001 — 値不正の種類は問わず案内する
+        return (f"BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE: 解釈条件が不正 {value!r}"
+                "(例: +09:00 / Asia/Tokyo。未設定なら表記なしの時刻は不採用)")
+    return None
+
+
+# 正確な座標に見える入力を拒否する(SECURITY.md / D-12。メッシュコード等の整数表記・
+# 「ST-12N」のような整数+方位の設置点名は許可。明らかな誤入力を防ぐ暫定ガード=D-29)
+_COORDINATE_PATTERNS = (
+    re.compile(r"-?\d{1,3}\.\d{3,}"),                          # 小数3桁以上の度表記(例 35.123)
+    re.compile(r"-?\d{1,3}\.\d+\s*[,;/\s]\s*[+-]?\d{1,3}\.\d+"),  # 小数の組(35.12,139.87 / 35.12 139.87)
+    re.compile(r"[°º]"),                                        # 度記号(DMS表記)
+    re.compile(r"\d{1,3}\s*度\s*\d{1,2}\s*分"),                  # 和文DMS(例 35度39分)
+    re.compile(r"\b\d{1,3}\.\d+\s*[NSEW]\b", re.I),             # 35.6N / 139.7E(小数+方位)
+    re.compile(r"\b[NSEW]\s*\d{1,3}\.\d+", re.I),               # N35.6 / E139.7(方位+小数)
+)
+
+
+def _looks_like_precise_coordinate(value: str | None) -> bool:
+    if not value:
+        return False
+    # 全角数字・記号(３５．１２３ 等)も判定対象にする
+    text = unicodedata.normalize("NFKC", value)
+    return any(p.search(text) for p in _COORDINATE_PATTERNS)
 
 
 def _open_db(storage: StorageConfig) -> sqlite3.Connection:
@@ -104,6 +165,13 @@ def _get_or_create(conn, table: str, where: dict, defaults: dict, prefix: str
 
 
 def cmd_setup(args) -> int:
+    for label, value in (("--project", args.project), ("--site", args.site),
+                         ("--station", args.station),
+                         ("--rounded-position", args.rounded_position)):
+        if _looks_like_precise_coordinate(value):
+            print(f"[NG] {label} に正確な座標と解釈できる値が含まれています。"
+                  "地点名・丸め位置には座標を入れず、メッシュコード等の丸め表現を使ってください(D-12)")
+            return 1
     storage = StorageConfig.load()
     conn = _open_db(storage)
     try:
@@ -171,6 +239,15 @@ def cmd_check_config(_args) -> int:
     for tool in (storage.ffmpeg, storage.ffprobe):
         checks.append(check_command(tool))
 
+    tz_problem = _check_naive_timezone(storage)
+    if tz_problem:
+        checks.append((False, tz_problem))
+    else:
+        checks.append((True, "BIO_OBSERVER_MEDIA_NAIVE_TIMEZONE: "
+                             + (f"{storage.media_naive_timezone}(表記なしの時刻に適用)"
+                                if storage.media_naive_timezone
+                                else "未設定(表記なしの時刻は不採用)")))
+
     try:
         conn = connect(storage.db_path)
         checks.append((True, f"DB: 接続OK(スキーマ版 {schema_version(conn)}。"
@@ -193,6 +270,24 @@ def cmd_check_config(_args) -> int:
 def _default_client_factory():
     from bio_observer.ingest.drive import GoogleDriveClient
     return GoogleDriveClient()
+
+
+def _classify_safely(exc: BaseException) -> str:
+    from bio_observer.ingest import errors as ingest_errors
+    try:
+        return ingest_errors.classify_error(exc)
+    except Exception:  # noqa: BLE001
+        return ingest_errors.PERMANENT
+
+
+def _is_auth_failure(exc: BaseException) -> bool:
+    from bio_observer.ingest import errors as ingest_errors
+    return isinstance(exc, WorkerFatalError) or _classify_safely(exc) == ingest_errors.AUTH
+
+
+def _is_transient_failure(exc: BaseException) -> bool:
+    from bio_observer.ingest import errors as ingest_errors
+    return _classify_safely(exc) in ingest_errors.WAITABLE
 
 
 def _print_summary(summary) -> None:
@@ -220,9 +315,14 @@ def _cmd_run_dry(args, storage: StorageConfig, cfg: DriveIngestConfig,
             print(f"[NG] SurveySessionがありません: {args.session}"
                   "(bio-observer setup で作成してください)")
             return 1
-        client = client_factory()
+        try:
+            client = client_factory()
+            plans = worker.plan_inbox(conn, client, cfg)
+        except Exception as exc:  # noqa: BLE001 — 例外文言(URL中のフォルダID)を伏せて案内
+            print(f"[NG] dry-run失敗: {_redact(exc, cfg)}")
+            return 1
         print("dry-run:受け箱の一覧のみ表示します(Drive・DBとも変更しません)")
-        for plan in worker.plan_inbox(conn, client, cfg):
+        for plan in plans:
             size = plan["size_bytes"] if plan["size_bytes"] is not None else "?"
             print(f"  {plan['name']}  size={size}  → {plan['action']}")
         return 0
@@ -240,6 +340,10 @@ def cmd_run(args, client_factory) -> int:
     if missing:
         for name in missing:
             print(f"[NG] {name}: 未設定(.env を確認。bio-observer check-config で検査できます)")
+        return 1
+    tz_problem = _check_naive_timezone(storage)
+    if tz_problem:
+        print(f"[NG] {tz_problem}")
         return 1
     cfg = DriveIngestConfig.load()
 
@@ -262,13 +366,36 @@ def cmd_run(args, client_factory) -> int:
                 print(f"[NG] SurveySessionがありません: {args.session}"
                       "(bio-observer setup で作成してください)")
                 return 1
-            client = client_factory()
+            try:
+                client = client_factory()
+            except Exception as exc:  # noqa: BLE001 — OAuth/設定不備を1行で案内
+                print(f"[NG] Driveクライアントの初期化に失敗: {_redact(exc, cfg)}")
+                if _is_transient_failure(exc):
+                    print("     ネットワーク・プロキシ(HTTPS_PROXY。PySocks が必要)を確認して再実行してください")
+                    return 1
+                print("     credentials/token のパスと初回認可(ブラウザ)を確認してください")
+                # 再認可が必要な失敗(RefreshError 等)はサイクル中と同じ exit 2 で統一
+                return 2 if _is_auth_failure(exc) else 1
             while True:
-                summary = worker.run_cycle(conn, client, cfg, storage, args.session)
-                print(f"{utc_now_iso()} サイクル完了")
-                _print_summary(summary)
-                if args.once:
-                    return 0
+                try:
+                    summary = worker.run_cycle(conn, client, cfg, storage, args.session)
+                except WorkerFatalError as exc:
+                    # 再認可・証明書・設定の問題は待っても直らない:常駐を止めて案内する
+                    # (状態はDBへ保存済み。対処後の run で未完了ジョブから再開される)
+                    print(f"{utc_now_iso()} [NG] {_redact(exc, cfg)}")
+                    print("     token/credentials の再認可、証明書・プロキシ設定を確認し、"
+                          "対処後に bio-observer run を再実行してください")
+                    return 2
+                except Exception as exc:  # noqa: BLE001 — 1サイクルの失敗で常駐を止めない
+                    print(f"{utc_now_iso()} サイクル失敗: {_redact(exc, cfg)}")
+                    if args.once:
+                        return 1
+                    print(f"  {args.interval}秒後に再試行します(状態はDBへ保存済み)")
+                else:
+                    print(f"{utc_now_iso()} サイクル完了")
+                    _print_summary(summary)
+                    if args.once:
+                        return 0
                 time.sleep(args.interval)
         except KeyboardInterrupt:
             print("\n停止しました(Ctrl+C)。状態はDBへ保存済みのため、"
@@ -303,11 +430,13 @@ def cmd_status(args) -> int:
         if not rows:
             print("IngestJobはまだありません(bio-observer run で取込を開始してください)")
             return 0
+        secrets = _env_secrets()
         for row in rows:
             media = row["media_asset_id"] or (
                 f"duplicate→{row['duplicate_of_media_asset_id']}"
                 if row["duplicate_of_media_asset_id"] else "-")
-            error = (row["error"] or "").replace("\n", " ")
+            # 保存済みの文言にも伏せ字を適用(旧版で保存された未マスクの値への防御)
+            error = worker.redact_secrets(row["error"] or "", secrets).replace("\n", " ")
             if len(error) > 80:
                 error = error[:80] + "…"
             print(f"{row['id']}  {row['status']:<18} retry={row['retry_count']} "
@@ -342,7 +471,8 @@ def cmd_inspect_time(args) -> int:
           f"{storage.media_naive_timezone or '未設定(表記なしは不採用)'}")
     for c in candidates:
         mark = "採用" if c["adopted"] else "不採用"
-        print(f"[{c['priority']}] {c['source']} ({c['location']}) → {mark}")
+        location = c["location"] or "タグなし"
+        print(f"[{c['priority']}] {c['source']} ({location}) → {mark}")
         print(f"    raw={c['raw_value']!r}  normalized={c['normalized_value']}  "
               f"timezone={c['timezone']}")
         print(f"    解釈: {c['interpretation']}")
@@ -402,7 +532,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="受け箱の一覧と処理予定のみ表示(Drive・DBとも変更しない)")
 
     status = sub.add_parser("status", help="IngestJobの一覧・状態・最終エラーを表示")
-    status.add_argument("--limit", type=int, default=20, help="表示件数(既定20)")
+    status.add_argument("--limit", type=_positive_int, default=20,
+                        help="表示件数(1以上の整数。既定20)")
 
     inspect = sub.add_parser(
         "inspect-time",

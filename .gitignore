@@ -6,6 +6,10 @@ secrets/
 *.secret
 *.key
 *.pem
+# Google OAuth クライアント・トークン(リポジトリ外パスに置くのが原則。誤配置の保険)
+credentials*.json
+client_secret*.json
+token*.json
 
 # ===== 座標・機微情報(SECURITY.md / D-12:正確な座標をリポジトリへ入れない)=====
 private/

@@ -34,20 +34,23 @@ conn = connect("path/to/bio_observer.sqlite3")  # 外部キー制約を強制有
 migrate(conn)                                   # 未適用マイグレーションを適用
 ```
 
-## 取込CLI(T-111時点)
+## 取込CLI(T-113時点)
 
-Google Drive受け箱からの自動取込をコマンドで実行できる(Windows手順の詳細は [docs/WINDOWS_E2E.md](docs/WINDOWS_E2E.md))。
+Google Drive受け箱からの自動取込をコマンドで実行できる(Windows手順の詳細は [docs/WINDOWS_E2E.md](docs/WINDOWS_E2E.md))。`run` には drive extra(`pip install -e ".[drive]"`)が必要。
 
 ```bash
-bio-observer check-config       # OAuth認可前の設定検査(Drive未接続)
+bio-observer check-config       # OAuth認可前の設定検査(Drive未接続。解釈条件TZの検査を含む)
 bio-observer migrate            # DB初期化
 bio-observer setup --project P --site A --station ST-1 --survey-date 2026-08-09
 bio-observer run --session ses_xxx --once --dry-run   # 一覧確認(Drive・DB無変更)
 bio-observer run --session ses_xxx --interval 300     # 継続実行(Ctrl+Cで安全停止)
-bio-observer status             # ジョブ一覧・最終エラー
+bio-observer status             # ジョブ一覧・最終エラー(フォルダIDは伏せ字)
+bio-observer inspect-time <file> --origin-modified-time 2026-08-09T11:35:51Z  # 撮影開始日時の候補評価(登録・DB・Drive無変更)
 ```
 
 同一DATA_ROOTで同時に実行できるワーカーは1プロセスのみ(排他ロック)。
+
+`run` の終了コード:0=正常(`--once` 完了 / Ctrl+C 停止)、1=設定不備・`--once` のサイクル失敗・二重起動、**2=認証・設定エラー(トークンの再認可、証明書・プロキシ設定の確認が必要。対処後に再実行すると未完了ジョブから再開)**。通信断・レート制限は継続実行なら次の間隔で自動再試行する(ジョブの再試行回数を消費しない)。
 
 ## セットアップ(T-003時点)
 
@@ -55,7 +58,7 @@ bio-observer status             # ジョブ一覧・最終エラー
 
 ```bash
 python3.11 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"        # 開発用(テスト含む)
+pip install -e ".[dev,drive]"  # 開発用(テスト含む)+Drive取込。drive extra なしでも動くが、Google ライブラリの実物例外を使うテスト数件が skip される
 # pip install -e ".[audio]"    # 音声解析(birdnet。M1で使用。初回実行時にモデルを自動取得)
 cp .env.example .env           # 保存場所等を編集(正確な座標・秘密情報は書かない)
 bio-observer-envcheck          # 環境確認
