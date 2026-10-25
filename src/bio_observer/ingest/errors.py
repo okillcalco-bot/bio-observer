@@ -134,7 +134,7 @@ def _classify_http(exc: BaseException, status: int) -> str:
     return PERMANENT
 
 
-def classify_error(exc: BaseException) -> str:
+def classify_error(exc: BaseException, *, _depth: int = 0) -> str:
     """例外を TRANSIENT / RATE_LIMITED / AUTH / PERMANENT のいずれかに分類する。"""
     # 1) Drive API 応答(HttpError 互換):ステータス+reason で判定
     status = _http_status(exc)
@@ -158,10 +158,10 @@ def classify_error(exc: BaseException) -> str:
     if _TRANSPORT_EXCEPTIONS and isinstance(exc, _TRANSPORT_EXCEPTIONS):
         return TRANSIENT
     # PySocks のプロキシ例外(httplib2 が HTTPS_PROXY 経由で投げる)は OSError 派生だが
-    # errno=None で、実際の通信エラーは socket_err に入る:内側で判定する
+    # errno=None で、実際の通信エラーは socket_err に入る:内側で判定する(連鎖は1段まで)
     inner = getattr(exc, "socket_err", None)
-    if isinstance(inner, BaseException) and inner is not exc:
-        if classify_error(inner) == TRANSIENT:
+    if isinstance(inner, BaseException) and inner is not exc and _depth < 2:
+        if classify_error(inner, _depth=_depth + 1) == TRANSIENT:
             return TRANSIENT
     if type(exc).__module__.split(".")[0] == "socks":  # ProxyError 系(接続拒否・407・502等)
         return TRANSIENT

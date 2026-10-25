@@ -61,6 +61,7 @@ bio-observer run --session ses_xxxx --interval 300
 # 通信断・レート制限では止まらず次の間隔で自動再試行する
 # 注意:完了後に同じファイルを Drive 上で上書き(同一 File ID)しても再取込されない。取り直しは
 #       新しいファイルとしてアップロードする。発見後にゴミ箱へ移動したファイルは failed で取込中止
+#       (復元しても同一 File ID のため再取込されない。取り直しは新しいファイルとして)
 # 注意:プロキシ環境(HTTPS_PROXY)では PySocks が必要(drive extra に含む。無いと Drive API だけ直結を試みる)
 
 # 状態確認

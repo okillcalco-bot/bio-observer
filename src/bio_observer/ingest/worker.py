@@ -405,7 +405,8 @@ def _ensure_source_unchanged(conn: sqlite3.Connection, client: DriveClient,
                 message="Drive上のファイルが変化したため一時ファイルを破棄して安定確認からやり直し",
                 detail={"before": {"size": job["size_bytes"], "modified": job["modified_time"]},
                         "after": {"size": info.size_bytes, "modified": info.modified_time}},
-                stable_probe_json=None, size_bytes=info.size_bytes, modified_time=info.modified_time)
+                stable_probe_json=None, size_bytes=info.size_bytes, modified_time=info.modified_time,
+                resume_status=None)  # 復帰先は安定確認で決め直す(古い値を残さない)
     return False
 
 

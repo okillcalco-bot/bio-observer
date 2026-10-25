@@ -1,6 +1,6 @@
 # 変更履歴(CHANGELOG.md)
 
-## 2026-09-21(T-113 取込ワーカー・CLIの堅牢性修正。Issue #14、PR #15。初版 2026-09-05、Codexレビュー対応2回+自己レビュー2周を含む。スキーマ変更なし)
+## 2026-09-21(T-113 取込ワーカー・CLIの堅牢性修正。Issue #14、PR #15。初版 2026-09-05、Codexレビュー対応2回+自己レビュー3周を含む。スキーマ変更なし)
 
 - ワーカー:ジョブ単位の例外捕捉を `Exception` へ拡大(Drive API の HttpError 等で run_cycle 全体が停止していた)。KeyboardInterrupt は従来どおり通す
 - ワーカー:waiting_for_upload 段階の失敗は retry_count を消費せず待機継続(IngestEvent に error を記録)。failed 判定はダウンロード以降の失敗に限定
@@ -46,6 +46,13 @@
 - CLI:初期化失敗の案内を原因で分岐(通信系/認証系)。座標ガードに NFKC 正規化と空白・`;`・`/` 区切りの小数の組
 - 文書:同一 File ID の内容差し替えは再取込されない旨(D-27・E2E)、confirmations=1 の注意(.env.example)、originals/ 孤児掃除は未実装(D-26 訂正)、D-29 追記
 - 回帰テスト8件(10ケース)追加(全137件パス。drive extra なしでは 131 passed / 6 skipped)。pyflakes クリーン
+
+### 2026-10-25 自己レビュー第3周(同PR。第2周差分の精査・T-112 経路の実行確認。新規の不具合なし=収束)
+
+- ワーカー:鮮度確認で waiting_for_upload へ戻す際に resume_status も初期化
+- errors:プロキシ例外の socket_err 連鎖判定を1段までに限定(循環参照でも停止)
+- 文書:ゴミ箱→復元したファイルは同一 File ID のため再取込されない旨(D-29・E2E)。AI_HANDOFF の状態更新
+- 全137件パス(逆順実行でも同じ)。drive extra なしでは 131 passed / 6 skipped。pyflakes クリーン
 
 ## 2026-09-06(T-112再レビュー対応:動画内タグの順次評価。Issue #12)
 

@@ -986,6 +986,7 @@ def test_stalled_upload_is_redownloaded_after_source_changes(db, seed, storage, 
     summary = run_cycle(db, drive, cfg, storage, seed["session"])
     job = db.execute("SELECT * FROM ingest_job").fetchone()
     assert summary.waiting == 1 and job["status"] == "waiting_for_upload"
+    assert job["resume_status"] is None  # 復帰先の古い値を残さない
     assert job["size_bytes"] == len(sample_bytes) and _tmp_files(storage) == []
     assert any(m and "変化したため" in m for (m,) in db.execute("SELECT message FROM ingest_event"))
     run_cycle(db, drive, cfg, storage, seed["session"])
@@ -1034,6 +1035,11 @@ def test_classify_html_token_response_and_proxy_errors():
     exc = ProxyConnectionError("Error connecting to HTTP proxy 127.0.0.1:9")
     exc.socket_err = ConnectionRefusedError(111, "Connection refused")
     assert exc.errno is None and classify_error(exc) == TRANSIENT
+    # socket_err が自己参照・循環していても分類器は停止する
+    loop = ProxyConnectionError("loop")
+    loop.socket_err = ProxyConnectionError("inner")
+    loop.socket_err.socket_err = loop
+    assert classify_error(loop) == TRANSIENT  # socks 由来として判定(無限再帰なし)
 
 
 def test_ingest_event_append_only(db, seed, cfg):
